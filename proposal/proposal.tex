@@ -1,0 +1,42 @@
+
+\documentclass{article}
+
+\usepackage[document]{ragged2e} % Formatting
+\usepackage[a4paper, total={6in, 8in}]{geometry} % Formatting
+\usepackage{graphicx} % Required for inserting images
+\usepackage{amssymb} % Math symbols
+\usepackage{biblatex} % Referencing
+\usepackage{amsmath} % bmatrix
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{array}
+\usepackage{float} % figure placement
+\usepackage{bm} % bold math
+\usepackage[]{fancyhdr}
+
+%\addbibresource{references.bib}
+
+\title{Proposal: Game Theoretic Collaborative Planning}
+%\author{\IEEEauthorblockN{1\textsuperscript{st} Alexander Wlodarczyk}
+%\IEEEauthorblockA{\textit{Institute for Aerospace Studies} \\
+%\author{Alexander Wlodarczyk\\
+%\textit{Institute for Aerospace Studies}\\
+%\textit{University of Toronto}\\
+%Toronto, Canada\\
+%alex.wlodarczyk@mail.utoronto.ca}
+
+\begin{document}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{AER1516 - Robot Motion Planning}
+\fancyhead[R]{Space Nerds \& Co}
+
+\maketitle
+\thispagestyle{fancy}
+
+\textbf{Background:} There exists a class of robotic motion planning problems in which a single platform operates within an unknown or semi-known environment while lacking the agility necessary to efficiently navigate its surroundings and plan an appropriate path toward its goal. A classic example of this can be seen in planetary robotics: Mars rovers, for example, have thus far always relied on human intervention to plan paths across the planet’s surface which meet scientific objectives while avoiding hazardous terrain conditions that could end the mission. Because of the time delays involved and the limited resolution of satellite imagery, this has not always resulted in success. The Spirit rover entered a region of soft sand in which it could not gain traction, ultimately marooning it in place [ROVER FAILURE]. Closer to home, one might see similar challenges following natural disasters which have caused substantial damage, yielding unknown and impassable obstacles in times when decisions must be made quickly. One approach to alleviating these types of difficulties is to pair the specialized, slow robot with a more agile one that can perform the task of exploration. Working collaboratively, the scout and the follower can quickly identify accessible routes and continuously relay to each other new information, allowing them to adapt the plan in real-time. Often, the scout takes the form of a miniature aerial vehicle (MAV) while the follower takes the form of a rover.
+
+\printbibliography
+
+\end{document}{}
