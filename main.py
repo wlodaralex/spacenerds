@@ -45,9 +45,8 @@ from simulation import run_simulation
 from visualization import *
 
 # Create output directory in user's home folder
-HOME = os.path.expanduser('~') # Get user's home directory
-outpath = os.path.join(HOME, "aer1516", "project", "outputs")
-
+BASE_DIR = os.path.dirname(os.path.abspath(__file__)) # spacenerds directory
+outpath = os.path.join(BASE_DIR, "outputs")
 
 def main():
     os.makedirs(outpath, exist_ok=True)
