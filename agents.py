@@ -27,9 +27,9 @@ def rover_sense(beliefs: dict, pos: tuple) -> None:
         * R = 2
         * M = 0.5
     """
-    R, M = 2.0, 0.5
-    for r in range(GRID):
-        for c in range(GRID):
+    R, M = 2, 0.5
+    for r in range(max(0, pos[0]-R), min(GRID, pos[0]+R+1)):
+        for c in range(max(0, pos[1]-R), min(GRID, pos[1]+R+1)):
             beta = sensor_beta(pos, (r, c), R, M)
             if beta <= 0.5:
                 continue
@@ -47,9 +47,9 @@ def copter_sense(beliefs: dict, pos: tuple) -> None:
         * R = 4
         * M = 0.4
     """
-    R, M = 4.0, 0.4
-    for r in range(GRID):
-        for c in range(GRID):
+    R, M = 4, 0.4
+    for r in range(max(0, pos[0]-R), min(GRID, pos[0]+R+1)):
+        for c in range(max(0, pos[1]-R), min(GRID, pos[1]+R+1)):
             beta = sensor_beta(pos, (r, c), R, M)
             if beta <= 0.5:
                 continue
@@ -130,8 +130,7 @@ def copter_explore(beliefs: dict, copter_pos: tuple, b_max: dict, T_c: int,
     return tuple(pos), substeps, belief_snapshots
 
 
-
-# Rover Mission Execution #
+#  Rover Mission Execution #
 def rover_execute(beliefs: dict, rover_pos: tuple, rover_q: int,
                   policy: dict, T_r: int,
                   record_beliefs: bool = False) -> tuple:
