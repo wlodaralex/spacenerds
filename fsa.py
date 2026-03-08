@@ -60,14 +60,8 @@ def fsa_step(q: int, labels: frozenset) -> int:
         return 1
     if q == 2:                      # found C and looking for D
         if 'D' in labels: return 5  # φ3 complete
-        if 'B' in labels: return 6  # also start φ2 branch
         if 'A' in labels: return 3  # φ1 complete (shortcut)
         return 2
-    if q == 6:                      # found C + found B, looking for D or C
-        if 'C' in labels: return 4  # φ2 complete (B then C)
-        if 'D' in labels: return 5  # φ3 complete (C then D)
-        if 'A' in labels: return 3
-        return 6
     return q
 
 
