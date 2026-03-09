@@ -78,7 +78,7 @@ def compute_B_en(cell_beliefs, q):
     Then accumulate by the FSA successor q' = δ(q, σ).
 
     Note: 
-        - This is called once per (cell, q) pair in value_iteration and cached, since beliefs are fixed within one VI call.
+        - This is called once per (cell, q) pair in rover_value_iteration and cached, since beliefs are fixed within one VI call.
     
     Return
         * {q_next: probability} = 1.0
@@ -92,4 +92,5 @@ def compute_B_en(cell_beliefs, q):
             b *= cell_beliefs[ap] if ap in sigma else (1.0 - cell_beliefs[ap])
         q_next = fsa_step(q, sigma)
         result[q_next] = result.get(q_next, 0.0) + b
+        
     return result

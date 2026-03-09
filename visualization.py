@@ -10,7 +10,7 @@ import matplotlib.patches as mpatches
 from matplotlib.animation import FuncAnimation, FFMpegWriter
 
 from environment      import GRID, AP_LIST, TRUE_L
-from planning import value_iteration
+from planning import rover_value_iteration
 
 # Colour scheme for each atomic proposition
 AP_COLORS = {
@@ -165,11 +165,11 @@ def make_final_beliefs_plot(history: dict, filepath: str) -> None:
     print(f"  Saved: {filepath}")
 
 
-def make_v_fxn_heatmap(beliefs: dict, filepath: str, rover_pos: tuple, rover_q: int) -> None:
+def make_v_fn_heatmap(beliefs: dict, filepath: str, rover_pos: tuple, rover_q: int) -> None:
     """
 
     """
-    V, _, _ = value_iteration(beliefs, vi_steps=80)
+    V, _, _ = rover_value_iteration(beliefs, vi_steps=80)
     grid  = np.array([[V.get((r, c, rover_q), 0.0) for c in range(GRID)]
                       for r in range(GRID)])
     fig, ax = plt.subplots(figsize=(7, 7))

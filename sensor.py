@@ -21,7 +21,7 @@ Setup:
 """
 
 import numpy as np
-from environment import *
+from environment import GRID
 
 
 
@@ -57,7 +57,7 @@ def sensor_beta(agent_pos: tuple, cell_pos: tuple, R: float, M: float) -> float:
 
 def bayes_update(belief: float, z: int, beta: float) -> float:
     """
-    Updates B(x |= ap) given observation z ∈ {0, 1} and sensor accuracy β.
+    Update B(x |= ap) given observation z ∈ {0, 1} and sensor accuracy β.
 
     Derivation from Bayes' theorem with Bernoulli likelihood (Eq. 8):
         - If z=1: posterior ∝ β * prior        (correct positive)
@@ -112,4 +112,5 @@ def init_beliefs() -> dict:
     for r in range(GRID):
         for c in range(GRID):
             B[(r, c)] = {'A': 0.1, 'B': 0.1, 'C': 0.1, 'D': 0.1, 'O': 0.3}
+            # B[(r, c)] = {'A': 0.5, 'B': 0.5, 'C': 0.5, 'D': 0.5, 'O': 0.5}
     return B

@@ -54,23 +54,41 @@ def main():
 
     scenarios = [
         {
-            'name': '1',
+            'name': 'global',
+            'exploration_policy': 'global',
             'rover_start': (0, 0),
             'copter_start': (0, 0),
             'T_c': 5,
             'T_r': 3,
             'alpha': 1.5,
-            'vi_steps': 80,
+            'vi_steps': 200,
             'max_k': 600,
             'warmup': 0, 
             'seed': 12,
             'store_belief_history': True,
         },
+        # {
+        #     'name': 'local',
+        #     'exploration_policy': 'local',
+        #     'rover_start': (0, 0),
+        #     'copter_start': (0, 0),
+        #     'T_c': 5,
+        #     'T_r': 3,
+        #     'alpha': 1.5,
+        #     'vi_steps': 200,
+        #     'max_k': 600,
+        #     'warmup': 0, 
+        #     'seed': 12,
+        #     'store_belief_history': True,
+        # },
     ]
 
+    results = {}
+    
     for scenario in scenarios:
+        name = scenario['name']
         print("\n" + "=" * 60)
-        print(f"SCENARIO {scenario['name']}  |  rover_start={scenario['rover_start']}, copter_start={scenario['copter_start']}")
+        print(f"SCENARIO {name}  |  rover_start={scenario['rover_start']}, copter_start={scenario['copter_start']}")
         print("=" * 60)
 
         hist = run_simulation(
@@ -84,19 +102,30 @@ def main():
             warmup=scenario['warmup'],
             seed=scenario['seed'],
             store_belief_history=scenario['store_belief_history'],
+            exploration_policy=scenario['exploration_policy'],
         )
+        results[name] = hist
 
-        prefix = os.path.join(outpath, f"scen{scenario['name']}")
+        prefix = os.path.join(outpath, f"scen{name}")
 
         make_belief_snapshots_plot(hist, filepath=prefix + "_belief_snapshots.png")
         make_trajectories_plot(hist, filepath=prefix + "_trajectories.png", use_substeps=True)
         make_final_beliefs_plot(hist, filepath=prefix + "_final_beliefs.png")
-        make_v_fxn_heatmap(hist['beliefs_snapshot'][0], filepath=prefix + "_value_function_q0.png", rover_pos=scenario['rover_start'], rover_q=0)
+        make_v_fn_heatmap(hist['beliefs_snapshot'][0], filepath=prefix + "_value_function_q0.png", rover_pos=scenario['rover_start'], rover_q=0)
         make_convergence_plot(hist, filepath=prefix + "_convergence.png")
         make_beliefs_animation(hist, filepath=prefix + "_beliefs_animation.mp4", fps=4, use_substeps=True)
         make_unified_animation(hist, filepath=prefix + "_unified_animation.mp4", fps=4, use_substeps=True)
     
-    print("\n Outputs saved to:", outpath)
+    print("\n" + "=" * 60)
+    print("COMPARISON SUMMARY")
+    print("=" * 60)
+    for name, hist in results.items():
+        status = ("COMPLETE" if hist['complete'] else
+                  ("FAILED"  if hist['fail']     else "TIMEOUT"))
+        print(f"  {name.upper():6s}:  k_final={hist['k_final']:4d}  "
+              f"branch={hist['which_phi']}  status={status}")
+    print("=" * 60)
+    print(f"\nOutputs saved to: {outpath}")
 
 
 if __name__ == '__main__':

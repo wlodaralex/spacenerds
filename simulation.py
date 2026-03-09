@@ -9,8 +9,8 @@ import numpy as np
 from environment import GRID
 from sensor import init_beliefs
 from fsa import FSA_ACCEPT, FSA_DEAD
-from planning import value_iteration, compute_b_max
-from agents import copter_sense, copter_explore, rover_execute
+from planning import rover_value_iteration, compute_b_max
+from agents import copter_sense, copter_explore_local, copter_explore_global, rover_execute
 
 
 def run_simulation(
@@ -24,6 +24,7 @@ def run_simulation(
     warmup   = 0,     
     seed     = 42,
     store_belief_history = False,
+    exploration_policy = 'global',
 ) -> dict:
     """
 
@@ -38,31 +39,34 @@ def run_simulation(
     k          = 0
 
     history = {
-        'rover_path':      [rover_pos],
-        'copter_path':     [copter_pos],
-        'rover_substeps':  [rover_pos],
+        'rover_path': [rover_pos],
+        'copter_path': [copter_pos],
+        'rover_substeps': [rover_pos],
         'copter_substeps': [copter_pos],
-        'fsa_states':      [rover_q],
-        'k_list':          [0],
-        'phase_list':      ['I'],  
-        'beliefs_snapshot':    [copy.deepcopy(beliefs)],
-        'snap_k':          [0],
-        'snap_rover':      [rover_pos],
-        'snap_copter':     [copter_pos],
-        'complete':        False,
-        'fail':            False,
-        'k_final':         0,
-        'which_phi':       None,
-        'belief_history':  [] if store_belief_history else None,
+        'fsa_states': [rover_q],
+        'k_list': [0],
+        'phase_list': ['I'],  
+        'beliefs_snapshot': [copy.deepcopy(beliefs)],
+        'snap_k': [0],
+        'snap_rover': [rover_pos],
+        'snap_copter': [copter_pos],
+        'complete': False,
+        'fail': False,
+        'k_final': 0,
+        'which_phi': None,
+        'belief_history': [] if store_belief_history else None,
+        'exploration_policy': exploration_policy,
     }
     SNAP_TARGETS = 3   
+
+    complete = False
 
     if store_belief_history:
         history['belief_history'].append(copy.deepcopy(beliefs))
 
-    complete = False
+    # Select exploration function
+    _explore = copter_explore_global if exploration_policy == 'global' else copter_explore_local
 
-    
 
     if warmup == 0:
         print("  Init: paper-faithful — copter senses from start at k=0")
@@ -81,9 +85,9 @@ def run_simulation(
         }
 
         for _ in range(warmup):
-            copter_pos, c_substeps, c_bsnaps = copter_explore(
+            copter_pos, c_substeps, c_bsnaps = _explore(
                 beliefs, copter_pos, centred_bmax, T_c, alpha=0.0,
-                record_beliefs=store_belief_history)
+                record_beliefs=store_belief_history, vi_steps=vi_steps)
             k += T_c
 
             k_base = k - T_c
@@ -102,16 +106,16 @@ def run_simulation(
         print(f"  Warmup done. k={k}")
 
     print("  Initial value iteration...")
-    V, policy, vi_sweeps = value_iteration(beliefs, vi_steps=vi_steps, T_r=T_r)
+    V, rover_policy, vi_sweeps = rover_value_iteration(beliefs, vi_steps=vi_steps, T_r=T_r)
     print(f"  Initial value iteration converged in {vi_sweeps}/{vi_steps} sweeps.")
-    b_max     = compute_b_max(beliefs, policy, rover_pos, rover_q, T_r)
+    b_max = compute_b_max(beliefs, rover_policy, rover_pos, rover_q, T_r)
 
     while k < max_k and not complete:
 
         k_before_c = k
-        copter_pos, c_substeps, c_bsnaps = copter_explore(
+        copter_pos, c_substeps, c_bsnaps = _explore(
             beliefs, copter_pos, b_max, T_c, alpha,
-            record_beliefs=store_belief_history)
+            record_beliefs=store_belief_history, vi_steps=vi_steps)
         k += T_c
 
         for step_i, cpos in enumerate(c_substeps):
@@ -124,11 +128,11 @@ def run_simulation(
                         else copy.deepcopy(beliefs))
                 history['belief_history'].append(snap)
 
-        V, policy, vi_sweeps = value_iteration(beliefs, vi_steps=vi_steps, T_r=T_r)
-        b_max     = compute_b_max(beliefs, policy, rover_pos, rover_q, T_r)
+        V, rover_policy, vi_sweeps = rover_value_iteration(beliefs, vi_steps=vi_steps, T_r=T_r)
+        b_max = compute_b_max(beliefs, rover_policy, rover_pos, rover_q, T_r)
         k_before_r = k
         rover_pos, rover_q, substeps, r_bsnaps = rover_execute(
-            beliefs, rover_pos, rover_q, policy, T_r,
+            beliefs, rover_pos, rover_q, rover_policy, T_r,
             record_beliefs=store_belief_history)
         k += T_r
 
@@ -168,11 +172,31 @@ def run_simulation(
             print(f"   MISSION FAILED (obstacle) at k={k}, pos={rover_pos}")
             history['fail'] = True
             break
-        elif k % 200 == 0:
+        elif k % 1 == 0:
             V_here = V.get((rover_pos[0], rover_pos[1], rover_q), 0.0)
             print(f"  k={k:4d}  rover={rover_pos}  q={rover_q}  "
                   f"V={V_here:.3f}  copter={copter_pos}"
                   f"VI={vi_sweeps}/{vi_steps} sweeps")
+
+        # # "assume that the mission is (regarded as) complete if the belief of satisfying 𝜙 by the rover’s optimal policy exceeds 0.98."
+        # # TODO: need to fix logic, causes run to end early
+        # V_here = V.get((rover_pos[0], rover_pos[1], rover_q), 0.0)
+        # if V_here > 0.98:
+        #     complete = True
+        #     which = {3: 'φ1 (found A)', 4: 'φ2 (B→C)',
+        #             5: 'φ3 (C→D)'}.get(rover_q, '?')
+        #     history['which_phi'] = which
+        #     print(f"   MISSION COMPLETE at k={k}, branch={which}, pos={rover_pos}"
+        #         f"[VI={vi_sweeps}/{vi_steps} sweeps]")
+        # elif rover_q == FSA_DEAD:
+        #         print(f"   MISSION FAILED (obstacle) at k={k}, pos={rover_pos}")
+        #         history['fail'] = True
+        #         break
+        # elif k % 200 == 0:
+        #     V_here = V.get((rover_pos[0], rover_pos[1], rover_q), 0.0)
+        #     print(f"  k={k:4d}  rover={rover_pos}  q={rover_q}  "
+        #         f"V={V_here:.3f}  copter={copter_pos}"
+        #         f"VI={vi_sweeps}/{vi_steps} sweeps")
 
     if not complete and not history['fail']:
         print(f"  Time limit reached at k={max_k}")

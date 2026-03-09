@@ -9,8 +9,6 @@ Setup:
         * Motion with 'p_intended' probability of reaching the desired cell and '1 - p_intended' slip probability split among cardinal neighbours of the target cell.
 """
 
-__all__ = ['GRID', 'AP_LIST', 'TRUE_L']
-
 # Grid (10x10)
 GRID = 10
 # Atomic propositions
@@ -43,7 +41,6 @@ for r in range(GRID):
 # MDP Motion Model #
 # Action indices
 ACTIONS = [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)] # stay, up, down, left, right
-NUM_ACTIONS = len(ACTIONS)
 # Cardinal offsets used to compute slip destinations
 CARDINALS = [(-1, 0), (1, 0), (0, -1), (0, 1)] 
 
@@ -76,4 +73,5 @@ def transition_probabilities(r: int, c: int, a_idx: int, p_intended: float) -> d
     probabilities = {(r2, c2): p_intended}
     for slip in slips:
         probabilities[slip] = probabilities.get(slip, 0.0) + slip_each # probability distribution of where the agent actually ends up
+    
     return probabilities
