@@ -31,12 +31,15 @@ def run_simulation(
     np.random.seed(seed)
     random.seed(seed)
 
-    beliefs    = init_beliefs()
-    rover_pos  = rover_start
-    rover_q    = 0
+    # 1 initialise the timestep, copter and rover positions
+    k          = 0                  
     copter_pos = copter_start
-    k          = 0
+    rover_pos  = rover_start
+    rover_q    = 0  
 
+    # 2 initialise the beliefs using prior knowledge
+    beliefs    = init_beliefs() 
+    
     history = {
         'rover_path':      [rover_pos],
         'copter_path':     [copter_pos],
@@ -55,59 +58,28 @@ def run_simulation(
         'which_phi':       None,
         'belief_history':  [] if store_belief_history else None,
     }
-    SNAP_TARGETS = 3   
+    SNAP_TARGETS = 3        # number of snapshots to take
 
     if store_belief_history:
         history['belief_history'].append(copy.deepcopy(beliefs))
 
     complete = False
-
     
+    copter_sense(beliefs, copter_pos)
+    history['beliefs_snapshot'][0] = copy.deepcopy(beliefs)
+    if store_belief_history:
+        history['belief_history'][-1] = copy.deepcopy(beliefs)
 
-    if warmup == 0:
-        print("  Init: paper-faithful — copter senses from start at k=0")
-        copter_sense(beliefs, copter_pos)
-        history['beliefs_snapshot'][0] = copy.deepcopy(beliefs)
-        if store_belief_history:
-            history['belief_history'][-1] = copy.deepcopy(beliefs)
-
-    else:
-        
-        print(f"  Warmup mode: {warmup} copter round(s) before rover starts...")
-        centred_bmax = {
-            (r, c): max(0.0, 1.0 - abs(r - rover_start[0]) / (GRID * 2)
-                                 - abs(c - rover_start[1]) / (GRID * 2))
-            for r in range(GRID) for c in range(GRID)
-        }
-
-        for _ in range(warmup):
-            copter_pos, c_substeps, c_bsnaps = copter_explore(
-                beliefs, copter_pos, centred_bmax, T_c, alpha=0.0,
-                record_beliefs=store_belief_history)
-            k += T_c
-
-            k_base = k - T_c
-            for step_i, cpos in enumerate(c_substeps):
-                history['copter_substeps'].append(cpos)
-                history['rover_substeps'].append(rover_pos)
-                history['k_list'].append(k_base + step_i + 1)
-                history['phase_list'].append('W')
-                if store_belief_history:
-                    snap = (c_bsnaps[step_i] if step_i < len(c_bsnaps)
-                            else copy.deepcopy(beliefs))
-                    history['belief_history'].append(snap)
-
-        history['copter_path'].append(copter_pos)
-        history['rover_path'].append(rover_pos)
-        print(f"  Warmup done. k={k}")
-
+    # 3 rover computes the optimal policy and b_max 
     print("  Initial value iteration...")
     V, policy, vi_sweeps = value_iteration(beliefs, vi_steps=vi_steps, T_r=T_r)
     print(f"  Initial value iteration converged in {vi_sweeps}/{vi_steps} sweeps.")
     b_max     = compute_b_max(beliefs, policy, rover_pos, rover_q, T_r)
 
+    # 4 repeat exploration phase (algorithm 2 or 3) and execution phase (algorithm 4)
     while k < max_k and not complete:
 
+        # 4.1 exploration phase (algorithm 2 or 3)
         k_before_c = k
         copter_pos, c_substeps, c_bsnaps = copter_explore(
             beliefs, copter_pos, b_max, T_c, alpha,
@@ -126,6 +98,8 @@ def run_simulation(
 
         V, policy, vi_sweeps = value_iteration(beliefs, vi_steps=vi_steps, T_r=T_r)
         b_max     = compute_b_max(beliefs, policy, rover_pos, rover_q, T_r)
+        
+        # 4.2 execution phase (algorithm 4)
         k_before_r = k
         rover_pos, rover_q, substeps, r_bsnaps = rover_execute(
             beliefs, rover_pos, rover_q, policy, T_r,
