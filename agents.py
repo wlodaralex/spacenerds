@@ -172,13 +172,9 @@ def _copter_kernel() -> np.ndarray:
     _P_COPTER = P
     return _P_COPTER
 
-def copter_explore_local(copter_pos: tuple, 
-                            beliefs: dict, 
-                            b_max: dict, 
-                            T_c: int, 
-                            alpha: float = 1.5, 
-                            record_beliefs: bool = False
-                        ) -> tuple:
+def copter_explore_local(beliefs: dict, copter_pos: tuple, b_max: dict,
+                         T_c: int, alpha: float = 1.5,
+                         record_beliefs: bool = False) -> tuple:
     """
     Local selection-based copter exploration (Section 4.2.3: Algorithm 2).
 
@@ -304,16 +300,8 @@ def rover_execute(beliefs: dict, rover_pos: tuple, rover_q: int,
     """
     pos              = list(rover_pos)
     q                = rover_q
-    substeps         = []
+    substeps         = [(tuple(pos), q)]
     belief_snapshots = []
-
-    q = fsa_step(q, TRUE_L[tuple(pos)])
-    rover_sense(beliefs, tuple(pos))
-    substeps.append((tuple(pos), q))
-    if record_beliefs:
-        belief_snapshots.append(copy.deepcopy(beliefs))
-    if q in FSA_ACCEPT or q == FSA_DEAD:
-        return tuple(pos), q, substeps, belief_snapshots
 
     for _ in range(T_r):
         if q in FSA_ACCEPT or q == FSA_DEAD:

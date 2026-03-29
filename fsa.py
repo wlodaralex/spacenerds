@@ -21,7 +21,6 @@ FSA States:
     * 3  : accept (φ1)    (reached A)
     * 4  : accept (φ2)    (reached C after B)
     * 5  : accept (φ3)    (reached D after C)
-    * 6  : found C and found B, looking for D or C
     * -1 : dead           (obstacle encountered)
 """
 

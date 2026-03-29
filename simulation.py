@@ -10,7 +10,8 @@ from environment import GRID
 from sensor import init_beliefs
 from fsa import FSA_ACCEPT, FSA_DEAD
 from planning import value_iteration, compute_b_max
-from agents import copter_sense, copter_explore, rover_execute
+from agents import copter_sense, copter_explore_local, copter_explore_global, rover_execute
+
 
 
 def run_simulation(
@@ -20,14 +21,17 @@ def run_simulation(
     T_r      = 3,     
     alpha    = 1.5,    
     vi_steps = 80,     
-    max_k    = 600,   
-    warmup   = 0,     
+    max_k    = 600,       
     seed     = 42,
+    copter_mode = 'global',
     store_belief_history = False,
 ) -> dict:
     """
 
     """
+    _COPTER_MODES = {'local': copter_explore_local, 'global': copter_explore_global}
+    copter_explore = _COPTER_MODES[copter_mode]
+
     np.random.seed(seed)
     random.seed(seed)
 
@@ -48,7 +52,7 @@ def run_simulation(
         'fsa_states':      [rover_q],
         'k_list':          [0],
         'phase_list':      ['I'],  
-        'beliefs_snapshot':    [copy.deepcopy(beliefs)],
+        'beliefs_snapshot':[copy.deepcopy(beliefs)],
         'snap_k':          [0],
         'snap_rover':      [rover_pos],
         'snap_copter':     [copter_pos],
@@ -64,7 +68,7 @@ def run_simulation(
         history['belief_history'].append(copy.deepcopy(beliefs))
 
     complete = False
-    
+
     copter_sense(beliefs, copter_pos)
     history['beliefs_snapshot'][0] = copy.deepcopy(beliefs)
     if store_belief_history:

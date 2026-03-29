@@ -31,9 +31,9 @@ Implementation parameters:
                 but does not specify a sweep count, in practice the algorithm is run to convergence. 
     - max_k: Hard time limit (total timesteps) added for computational practicality. Prevents the simulation 
              from running indefinitely if beliefs do not converge or the rover cannot find a path.
-    - warmup: Practical heuristic that maintains strict 'algorithm 1' adherence when warmup=0 (see CHANGELOG.md).
-        * 0 -> copter senses once from start at k=0, matching the the non-unform belief patch visible in right-most plot of Fig. 3.
-        * N -> N copter-only exploration prior to rover movement, uses a rover-centred b_max so pre-exploration covers the rover's upcoming area rather than wandering randomly.
+    - copter_mode: Selects the copter exploration algorithm.
+        * 'local' -> Algorithm 2 (local selection-based exploration, Eq. 11).
+        * 'global' -> Algorithm 3 (global selection-based exploration, Eqs. 12-13).
     - seed: Fixes the pseudo-random state for stochastic transitions and sensor noise, ensuring results are reproducible across runs.
             Added for scientific reproducibility and presentation consistency (the same seed produces the same trajectory every run).
     - store_belief_history: When 'True', records a full deepcopy of the 10x10 belief grid at every timestep k (required for some visualizations).
@@ -41,6 +41,8 @@ Implementation parameters:
 """
 
 import os
+import time
+import numpy as np
 from simulation import run_simulation
 from visualization import *
 
@@ -53,7 +55,7 @@ def main():
 
     scenarios = [
         {
-            'name': '1',
+            'name': '_global',
             'rover_start': (0, 0),
             'copter_start': (0, 0),
             'T_c': 5,
@@ -61,7 +63,20 @@ def main():
             'alpha': 1.5,
             'vi_steps': 80,
             'max_k': 600,
-            'warmup': 0, 
+            'copter_mode': 'global',
+            'seed': 12,
+            'store_belief_history': True,
+        },
+            {
+            'name': '_local',
+            'rover_start': (0, 0),
+            'copter_start': (0, 0),
+            'T_c': 5,
+            'T_r': 3,
+            'alpha': 1.5,
+            'vi_steps': 80,
+            'max_k': 600,
+            'copter_mode': 'local',
             'seed': 12,
             'store_belief_history': True,
         },
@@ -80,7 +95,7 @@ def main():
             alpha=scenario['alpha'],
             vi_steps=scenario['vi_steps'],
             max_k=scenario['max_k'],
-            warmup=scenario['warmup'],
+            copter_mode=scenario.get('copter_mode', 'global'),
             seed=scenario['seed'],
             store_belief_history=scenario['store_belief_history'],
         )
@@ -98,5 +113,80 @@ def main():
     print("\n Outputs saved to:", outpath)
 
 
+def table1_experiment(n_trials=100, max_k=300, meta_seed=0):
+    """
+    Reproduce Table 1 from the paper (Section 6.1.2).
+
+    For each trial:
+        1. Randomly sample rover and copter start positions from X.
+        2. Run Algorithm 1 with local exploration  (Algorithm 2).
+        3. Run Algorithm 1 with global exploration (Algorithm 3).
+    Both use the same start positions and per-trial seed.
+
+    Report:
+        * Number of missions completed before k = max_k.
+        * Average running time (s) per simulation.
+    """
+    from environment import GRID, TRUE_L
+
+    rng = np.random.RandomState(meta_seed)
+
+    free_space = [(r, c) for r in range(GRID) for c in range(GRID)
+                  if 'O' not in TRUE_L[(r, c)]]
+
+    results = {
+        'local':  {'complete': 0, 'times': []},
+        'global': {'complete': 0, 'times': []},
+    }
+
+    starts = []
+    for i in range(n_trials):
+        rover  = free_space[rng.randint(len(free_space))]
+        copter = free_space[rng.randint(len(free_space))]
+        starts.append((rover, copter))
+
+    for i, (rover, copter) in enumerate(starts):
+        seed_i = meta_seed + i + 1
+
+        trial_ok = {}
+        for mode in ('local', 'global'):
+            t0 = time.time()
+            hist = run_simulation(
+                rover_start=rover,
+                copter_start=copter,
+                T_c=5, T_r=3, alpha=1.5, vi_steps=80,
+                max_k=max_k,
+                copter_mode=mode,
+                seed=seed_i,
+                store_belief_history=False,
+            )
+            elapsed = time.time() - t0
+            results[mode]['times'].append(elapsed)
+            trial_ok[mode] = hist['complete']
+            if hist['complete']:
+                results[mode]['complete'] += 1
+
+        local_s  = 'complete' if trial_ok['local']  else '--'
+        global_s = 'complete' if trial_ok['global'] else '--'
+        print(f"  Trial {i+1:3d}/{n_trials}  "
+              f"rover={str(rover):>7s} copter={str(copter):>7s}  "
+              f"local={local_s}  global={global_s}")
+
+    print("Table 1 Reproduction (Section 6.1.2)")
+    header = f"  {'':30} {'Completions':>14}   {'Avg time (s)':>13}"
+    sep    = f"  {'-'*30} {'-'*14}   {'-'*13}"
+    print(header)
+    print(sep)
+    for mode in ('local', 'global'):
+        alg = 'Algorithm 2' if mode == 'local' else 'Algorithm 3'
+        label = f"{mode.capitalize()} ({alg})"
+        comp  = results[mode]['complete']
+        avg_t = np.mean(results[mode]['times'])
+        print(f"  {label:30s} {comp:>7d}/{n_trials}     {avg_t:>10.1f}")
+    print(f"  Paper reference:  Local  62/100, 3.0 s")
+    print(f"                    Global 71/100, 31  s")
+
+
 if __name__ == '__main__':
-    main()
+    # main()
+    table1_experiment(n_trials=100, max_k=300, meta_seed=0)

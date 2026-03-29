@@ -22,9 +22,30 @@ Setup:
             - See CHANGELOG.md.
 """
 
+import numpy as np
 from environment import GRID, ACTIONS, transition_probabilities
 from fsa import FSA_ACCEPT, FSA_DEAD, FSA_ALL, compute_B_en
 
+_Q_IDX = {q: i for i, q in enumerate(FSA_ALL)}
+_NQ = len(FSA_ALL)
+_N = GRID * GRID
+_P_ROVER = None
+
+def _rover_kernel():
+    """Build and cache rover transition kernel P[a, i, j] with p_intended=0.95."""
+    global _P_ROVER
+    if _P_ROVER is not None:
+        return _P_ROVER
+    nA = len(ACTIONS)
+    P = np.zeros((nA, _N, _N))
+    for r in range(GRID):
+        for c in range(GRID):
+            i = r * GRID + c
+            for a in range(nA):
+                for (r2, c2), p in transition_probabilities(r, c, a, 0.95).items():
+                    P[a, i, r2 * GRID + c2] = p
+    _P_ROVER = P
+    return P
 
 
 # Value Iteration #
@@ -41,90 +62,91 @@ def value_iteration(beliefs: dict, vi_steps: int = 80, T_r: int = 3, tol: float 
     
     Parameter:
         * beliefs  : environmental belief dict. B[(r,c)][ap] that is fixed for this VI call.
-        * T_r      : rover execution phase length that controls stay-action inclusion.
-                        * T_r <= 5 : all 5 actions (paper's implementation)
-                        * T_r > 5  : 4 cardinal actions (stay excluded)
         * vi_steps : maximum number of sweeps.
-        * tol      : convergence threshold (default of 1e-6).
+        * tol      : convergence threshold.
 
     Return:
-        * V           : dict. keyed by (r, c, q) -> value in [0, 1].
-        * policy      : dict. keyed by (r, c, q) -> action index.
-        * sweeps_used :
-            * sweeps_used < T_steps  : indicates early convergence.
-            * sweeps_used == T_steps : performed all allowed sweeps.
-                - VI did not meet the early stopping criterion, but the value function may still be stable.
+        * V           : dict keyed by (r, c, q) -> value in [0, 1].
+        * policy      : dict keyed by (r, c, q) -> action index.
+        * sweeps_used : number of sweeps performed.
     """
-    cells = []
+    P = _rover_kernel()
+    nA = len(ACTIONS)
+
+    # B_en[i, qi, qj] = belief-weighted FSA transition probability at cell i from q_qi to q_qj
+    B_en = np.zeros((_N, _NQ, _NQ))
     for r in range(GRID):
         for c in range(GRID):
-            cells.append((r, c))
+            i = r * GRID + c
+            for q in FSA_ALL:
+                qi = _Q_IDX[q]
+                if q in FSA_ACCEPT or q == FSA_DEAD:
+                    continue
+                ben = compute_B_en(beliefs[(r, c)], q)
+                for q_next, p_fsa in ben.items():
+                    B_en[i, qi, _Q_IDX[q_next]] = p_fsa
 
-    # Initialize V
-    V = {}
-    for (r, c) in cells:
-        for q in FSA_ALL:
-            if q in FSA_ACCEPT:
-                V[(r, c, q)] = 1.0  # mission success
-            else:
-                V[(r, c, q)] = 0.0
+    # V[i, qi] — value at (cell i, FSA state index qi)
+    V = np.zeros((_N, _NQ))
+    for q in FSA_ACCEPT:
+        V[:, _Q_IDX[q]] = 1.0
 
-    # Cache B_en for all non-terminal (cell, q) pairs
-    B_en = {}
-    for (r, c) in cells:
-        for q in FSA_ALL:
-            if q not in FSA_ACCEPT and q != FSA_DEAD:
-                # Beliefs are fixed for the duration of one VI call
-                B_en[(r, c, q)] = compute_B_en(beliefs[(r, c)], q) 
+    accept_mask = np.array([q in FSA_ACCEPT for q in FSA_ALL])
+    dead_idx = _Q_IDX[FSA_DEAD]
+    active_qi = [_Q_IDX[q] for q in FSA_ALL if q not in FSA_ACCEPT and q != FSA_DEAD]
 
-    policy = {}
-    action_range = range(1, len(ACTIONS)) if T_r > 5 else range(len(ACTIONS))
+    pol = np.ones((_N, _NQ), dtype=int)
 
     for sweep in range(vi_steps):
-        V_new = {}
-        delta = 0.0  # track max change this sweep (for convergence check)
+        # For each action a: Q_a[i, qi] = Σ_j P[a,i,j] * Σ_qj B_en[i,qi,qj] * V[j,qj]
+        # Rewrite: weighted_V[i, qi] = Σ_qj B_en[i,qi,qj] * V_sum_over_j[a,i,qj]
+        #   where V_sum_over_j[a,i,qj] = Σ_j P[a,i,j]*V[j,qj] = (P[a] @ V[:,qj])[i]
 
-        for (r, c) in cells:
-            for q in FSA_ALL:
+        # PV[a, i, qj] = Σ_j P[a,i,j] * V[j,qj]
+        PV = np.einsum('aij,jq->aiq', P, V)
 
-                # Absorbing states
-                if q in FSA_ACCEPT:
-                    V_new[(r, c, q)] = 1.0
-                    policy[(r, c, q)] = 0  # stay is correct at accepting state
-                    continue
-                if q == FSA_DEAD:
-                    V_new[(r, c, q)] = 0.0
-                    policy[(r, c, q)] = 0
-                    continue
+        # Q_a[a, i, qi] = Σ_qj B_en[i,qi,qj] * PV[a,i,qj]
+        Q_all = np.einsum('iqj,aij->aiq', B_en, PV)
 
-                ben = B_en.get((r, c, q), {})
-                best_val = 0.0
-                best_a = 1  # default: move up
+        # cardinal actions only (exclude stay = action 0)
+        Q_card = Q_all[1:]
+        best_a_offset = np.argmax(Q_card, axis=0)
+        best_a = best_a_offset + 1
+        V_new_vals = np.max(Q_card, axis=0)
 
-                # Bellman maximization over actions
-                for a in action_range:
-                    trans = transition_probabilities(r, c, a, p_intended=0.95)
-                    val = 0.0
-                    for (r2, c2), p_move in trans.items():
-                        for q_next, p_fsa in ben.items():
-                            val += p_move * p_fsa * V.get((r2, c2, q_next), 0.0)
-                    if val > best_val:
-                        best_val = val
-                        best_a = a
+        # Preserve absorbing states
+        V_new = V_new_vals.copy()
+        for q in FSA_ACCEPT:
+            V_new[:, _Q_IDX[q]] = 1.0
+        V_new[:, dead_idx] = 0.0
 
-                V_new[(r, c, q)] = best_val
-                policy[(r, c, q)] = best_a
-
-                # Track the largest change across non-terminal states
-                delta = max(delta, abs(best_val - V.get((r, c, q), 0.0)))
-
+        delta = np.max(np.abs(V_new - V))
         V = V_new
+        pol = best_a
 
-        # Early exit if value function has stabilized
         if delta < tol:
-            return V, policy, sweep + 1  # converged before budget exhausted
+            return _unpack(V, pol, sweep + 1)
 
-    return V, policy, vi_steps  # budget exhausted (V may still be practically converged)
+    return _unpack(V, pol, vi_steps)
+
+
+def _unpack(V_arr, pol_arr, sweeps):
+    """Convert numpy arrays back to dicts for compatibility."""
+    V = {}
+    policy = {}
+    for r in range(GRID):
+        for c in range(GRID):
+            i = r * GRID + c
+            for q in FSA_ALL:
+                qi = _Q_IDX[q]
+                V[(r, c, q)] = float(V_arr[i, qi])
+                if q in FSA_ACCEPT:
+                    policy[(r, c, q)] = 0
+                elif q == FSA_DEAD:
+                    policy[(r, c, q)] = 0
+                else:
+                    policy[(r, c, q)] = int(pol_arr[i, qi])
+    return V, policy, sweeps
 
 
 
