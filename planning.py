@@ -24,7 +24,8 @@ Setup:
               the freeze is enough to look like a hang.
             - See CHANGELOG.md.
 """
-from numpy import random
+import numpy as np
+# from numpy import random
 
 from environment import GRID, ACTIONS, transition_probabilities
 from fsa import FSA_ACCEPT, FSA_DEAD, FSA_ALL, compute_B_en
@@ -97,14 +98,14 @@ def copter_value_iteration(target: tuple, vi_steps: int = 80, tol: float = 1e-3)
                     val = 0.0
                     for cell, p in trans.items():
                         val += p * V.get(cell, 0.0)
-                    if val > best_val + 1e-5:
+                    if val > best_val + 1e-4:
                         best_val = val
                         candidates = [a]
-                    elif abs(val - best_val) < 1e-5:
+                    elif abs(val - best_val) < 1e-4:
                         candidates.append(a)
 
                 V_new[(r, c)] = best_val
-                copter_policy[(r, c)] = random.choice(candidates)
+                copter_policy[(r, c)] = np.random.choice(candidates)
 
                 # Track the largest change across non-terminal states                
                 delta = max(delta, abs(best_val - V.get((r, c), 0.0)))
@@ -218,14 +219,14 @@ def rover_value_iteration(beliefs: dict, vi_steps: int = 80, T_r: int = 3, tol: 
                     for (r2, c2), p_move in trans.items():
                         for q_next, p_fsa in ben.items():
                             val += p_move * p_fsa * V.get((r2, c2, q_next), 0.0)
-                    if val > best_val + 1e-6:
+                    if val > best_val + 1e-5:
                         best_val = val
                         candidates = [a]
-                    elif abs(val - best_val) < 1e-6:
+                    elif abs(val - best_val) < 1e-5:
                         candidates.append(a)
 
                 V_new[(r, c, q)] = best_val
-                rover_policy[(r, c, q)] = random.choice(candidates)
+                rover_policy[(r, c, q)] = np.random.choice(candidates)
 
                 # Track the largest change across non-terminal states
                 delta = max(delta, abs(best_val - V.get((r, c, q), 0.0)))

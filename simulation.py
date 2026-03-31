@@ -3,7 +3,7 @@ simulation.py
 """
 
 import copy
-import random
+# import random
 import numpy as np
 
 from environment import GRID
@@ -25,12 +25,14 @@ def run_simulation(
     seed     = 42,
     store_belief_history = False,
     exploration_policy = 'global',
+    use_substeps=True,
+    verbose=True,
 ) -> dict:
     """
 
     """
     np.random.seed(seed)
-    random.seed(seed)
+    # random.seed(seed)
 
     beliefs    = init_beliefs()
     rover_pos  = rover_start
@@ -56,6 +58,7 @@ def run_simulation(
         'which_phi': None,
         'belief_history': [] if store_belief_history else None,
         'exploration_policy': exploration_policy,
+        'v_history': [] if store_belief_history else None,
     }
     SNAP_TARGETS = 3   
 
@@ -69,15 +72,16 @@ def run_simulation(
 
 
     if warmup == 0:
-        print("  Init: paper-faithful — copter senses from start at k=0")
+        if verbose:
+            print("  Init: paper-faithful — copter senses from start at k=0")
         copter_sense(beliefs, copter_pos)
         history['beliefs_snapshot'][0] = copy.deepcopy(beliefs)
         if store_belief_history:
             history['belief_history'][-1] = copy.deepcopy(beliefs)
 
     else:
-        
-        print(f"  Warmup mode: {warmup} copter round(s) before rover starts...")
+        if verbose:
+            print(f"  Warmup mode: {warmup} copter round(s) before rover starts...")
         centred_bmax = {
             (r, c): max(0.0, 1.0 - abs(r - rover_start[0]) / (GRID * 2)
                                  - abs(c - rover_start[1]) / (GRID * 2))
@@ -87,7 +91,8 @@ def run_simulation(
         for _ in range(warmup):
             copter_pos, c_substeps, c_bsnaps = _explore(
                 beliefs, copter_pos, centred_bmax, T_c, alpha=0.0,
-                record_beliefs=store_belief_history, vi_steps=vi_steps)
+                record_beliefs=store_belief_history, vi_steps=vi_steps,
+                verbose=verbose)
             k += T_c
 
             k_base = k - T_c
@@ -105,9 +110,13 @@ def run_simulation(
         history['rover_path'].append(rover_pos)
         print(f"  Warmup done. k={k}")
 
-    print("  Initial value iteration...")
+    if verbose:
+        print("  Initial value iteration...")
     V, rover_policy, vi_sweeps = rover_value_iteration(beliefs, vi_steps=vi_steps, T_r=T_r)
-    print(f"  Initial value iteration converged in {vi_sweeps}/{vi_steps} sweeps.")
+    if verbose:
+        print(f"  Initial value iteration converged in {vi_sweeps}/{vi_steps} sweeps.")
+    if store_belief_history:
+        history['v_history'].append(copy.deepcopy(V))
     b_max = compute_b_max(beliefs, rover_policy, rover_pos, rover_q, T_r)
 
     while k < max_k and not complete:
@@ -115,7 +124,8 @@ def run_simulation(
         k_before_c = k
         copter_pos, c_substeps, c_bsnaps = _explore(
             beliefs, copter_pos, b_max, T_c, alpha,
-            record_beliefs=store_belief_history, vi_steps=vi_steps)
+            record_beliefs=store_belief_history, vi_steps=vi_steps,
+            verbose=verbose)
         k += T_c
 
         for step_i, cpos in enumerate(c_substeps):
@@ -129,11 +139,13 @@ def run_simulation(
                 history['belief_history'].append(snap)
 
         V, rover_policy, vi_sweeps = rover_value_iteration(beliefs, vi_steps=vi_steps, T_r=T_r)
+        if store_belief_history:
+            history['v_history'].append(copy.deepcopy(V))
         b_max = compute_b_max(beliefs, rover_policy, rover_pos, rover_q, T_r)
         k_before_r = k
         rover_pos, rover_q, substeps, r_bsnaps = rover_execute(
             beliefs, rover_pos, rover_q, rover_policy, T_r,
-            record_beliefs=store_belief_history)
+            record_beliefs=store_belief_history, verbose=verbose)
         k += T_r
 
         for step_i, (spos, sq) in enumerate(substeps[1:]):
@@ -166,13 +178,15 @@ def run_simulation(
             which = {3: 'φ1 (found A)', 4: 'φ2 (B→C)',
                      5: 'φ3 (C→D)'}.get(rover_q, '?')
             history['which_phi'] = which
-            print(f"   MISSION COMPLETE at k={k}, branch={which}, pos={rover_pos}"
+            if verbose:
+                print(f"   MISSION COMPLETE at k={k}, branch={which}, pos={rover_pos}"
                   f"[VI={vi_sweeps}/{vi_steps} sweeps]")
         elif rover_q == FSA_DEAD:
-            print(f"   MISSION FAILED (obstacle) at k={k}, pos={rover_pos}")
+            if verbose:
+                print(f"   MISSION FAILED (obstacle) at k={k}, pos={rover_pos}")
             history['fail'] = True
             break
-        elif k % 1 == 0:
+        elif k % 1 == 0 and verbose:
             V_here = V.get((rover_pos[0], rover_pos[1], rover_q), 0.0)
             print(f"  k={k:4d}  rover={rover_pos}  q={rover_q}  "
                   f"V={V_here:.3f}  copter={copter_pos}"
@@ -198,7 +212,7 @@ def run_simulation(
         #         f"V={V_here:.3f}  copter={copter_pos}"
         #         f"VI={vi_sweeps}/{vi_steps} sweeps")
 
-    if not complete and not history['fail']:
+    if not complete and not history['fail'] and verbose:
         print(f"  Time limit reached at k={max_k}")
 
    

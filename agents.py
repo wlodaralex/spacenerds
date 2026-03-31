@@ -10,7 +10,7 @@ Setup:
 """
 
 import copy
-import random
+# import random
 import numpy as np
 
 from environment import GRID, AP_LIST, ACTIONS, CARDINALS, clip, TRUE_L, transition_probabilities
@@ -92,7 +92,8 @@ def acquisition_fn_W(beliefs: dict, b_max: dict, alpha: float) -> dict:
 
 # Copter Exploration (Local) #
 def copter_explore_local(beliefs: dict, copter_pos: tuple, b_max: dict, T_c: int,
-                         alpha: float = 1.5, record_beliefs: bool = False, vi_steps: int = 80) -> tuple:
+                         alpha: float = 1.5, record_beliefs: bool = False, vi_steps: int = 80,
+                         verbose: bool = True) -> tuple:
     """
     Run the copter's local selection-based exploration for T_c steps (algorithm 2).
 
@@ -144,7 +145,7 @@ def copter_explore_local(beliefs: dict, copter_pos: tuple, b_max: dict, T_c: int
             slips = [list(clip(nr + ddr, nc + ddc))
                     for ddr, ddc in CARDINALS
                     if clip(nr + ddr, nc + ddc) != (nr, nc)]
-            pos = random.choice(slips) if slips else [nr, nc]
+            pos = slips[np.random.randint(len(slips))] if slips else [nr, nc]
         
         copter_sense(beliefs, tuple(pos))
         substeps.append(tuple(pos))
@@ -157,7 +158,8 @@ def copter_explore_local(beliefs: dict, copter_pos: tuple, b_max: dict, T_c: int
 
 # Copter Exploration (Global) #
 def copter_explore_global(beliefs: dict, copter_pos: tuple, b_max: dict, T_c: int,
-                   alpha: float = 1.5, record_beliefs: bool = False, vi_steps: int = 80) -> tuple:
+                   alpha: float = 1.5, record_beliefs: bool = False, vi_steps: int = 80,
+                   verbose: bool = True) -> tuple:
     """    
     Run the copter's global selection-based exploration for T_c steps (algorithm 3).
 
@@ -240,7 +242,7 @@ def copter_explore_global(beliefs: dict, copter_pos: tuple, b_max: dict, T_c: in
                 slips = [list(clip(nr + ddr, nc + ddc))
                          for ddr, ddc in CARDINALS
                          if clip(nr + ddr, nc + ddc) != (nr, nc)]
-                pos = random.choice(slips) if slips else [nr, nc]
+                pos = slips[np.random.randint(len(slips))] if slips else [nr, nc]
 
             copter_sense(beliefs, tuple(pos))
             substeps.append(tuple(pos))
@@ -248,7 +250,8 @@ def copter_explore_global(beliefs: dict, copter_pos: tuple, b_max: dict, T_c: in
                 belief_snapshots.append(copy.deepcopy(beliefs))
 
             l += 1
-    print(f"  Copter value iteration maximum sweeps used {max_copter_vi_sweeps}/{vi_steps}.")
+    if verbose:
+        print(f"  Copter value iteration maximum sweeps used {max_copter_vi_sweeps}/{vi_steps}.")
 
     return tuple(pos), substeps, belief_snapshots
 
@@ -257,7 +260,7 @@ def copter_explore_global(beliefs: dict, copter_pos: tuple, b_max: dict, T_c: in
 # Rover Mission Execution #
 def rover_execute(beliefs: dict, rover_pos: tuple, rover_q: int,
                   rover_policy: dict, T_r: int,
-                  record_beliefs: bool = False) -> tuple:
+                  record_beliefs: bool = False, verbose: bool = True) -> tuple:
     """
 
     """
@@ -268,7 +271,7 @@ def rover_execute(beliefs: dict, rover_pos: tuple, rover_q: int,
 
     q_prev = q
     q = fsa_step(q, TRUE_L[tuple(pos)])
-    if q != q_prev:
+    if q != q_prev and verbose:
         print(f"    FSA transition: q={q_prev} → q={q} at pos={tuple(pos)}, labels={TRUE_L[tuple(pos)]}")
 
 
@@ -290,17 +293,17 @@ def rover_execute(beliefs: dict, rover_pos: tuple, rover_q: int,
         if np.random.rand() < 0.95:
             pos = [nr, nc]
             # Debug: Log when rover visits cells near D
-            if tuple(pos) in [(7,5), (7,6), (6,6), (8,6)]:
+            if tuple(pos) in [(7,5), (7,6), (6,6), (8,6)] and verbose:
                 print(f"      Rover at {tuple(pos)}, q={q}, looking for={'D' if q==2 else 'other'}")
         else:
             slips = [list(clip(nr + ddr, nc + ddc))
                      for ddr, ddc in CARDINALS
                      if clip(nr + ddr, nc + ddc) != (nr, nc)]
-            pos = random.choice(slips) if slips else [nr, nc]
+            pos = slips[np.random.randint(len(slips))] if slips else [nr, nc]
 
         q_prev = q
         q = fsa_step(q, TRUE_L[tuple(pos)])
-        if q != q_prev:
+        if q != q_prev and verbose:
             print(f"    FSA transition: q={q_prev} → q={q} at pos={tuple(pos)}, labels={TRUE_L[tuple(pos)]}")
 
         rover_sense(beliefs, tuple(pos))
