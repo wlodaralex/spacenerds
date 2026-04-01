@@ -1,14 +1,9 @@
-"""
-agents.py - Rover mission execution
-          - Copter exploration
-
-Setup:
-    - Rover: mission execution (Section 4.3.2: Algorithm 4).
-    - Copter: global selection-based exploration (Section 4.2.3: Algorithm 3).
-"""
+"""rover execution, sensing, and copter exploration policies."""
 
 import copy
+import math
 import random
+
 import numpy as np
 
 from environment import GRID, AP_LIST, ACTIONS, CARDINALS, clip, TRUE_L, transition_probabilities
@@ -17,77 +12,44 @@ from fsa import FSA_ACCEPT, FSA_DEAD, fsa_step, compute_B_en
 
 
 _P_COPTER = None
+_UTILITY_ROLLOUT_CACHE = {}
 
-# Sensing #
 def rover_sense(beliefs: dict, pos: tuple) -> None:
-    """
-    Update beliefs for all cls (in-place) within rover sensor range.
-
-    * AP_r = {A,B,C,D,O}
-    * Rover's maximum accuracy is 100% (Section 6.1.1):
-        * R = 2
-        * M = 0.5
-    """
+    """update all local beliefs visible to the rover."""
     R, M = 2, 0.5
     for r in range(max(0, pos[0]-R), min(GRID, pos[0]+R+1)):
         for c in range(max(0, pos[1]-R), min(GRID, pos[1]+R+1)):
+            # formula: quartic sensor dome
             beta = sensor_beta(pos, (r, c), R, M)
             if beta <= 0.5:
                 continue
             for ap in AP_LIST:
+                # formula: bernoulli bayes flip
                 z = observe(TRUE_L[(r, c)], ap, beta)
                 beliefs[(r, c)][ap] = bayes_update(beliefs[(r, c)][ap], z, beta)
 
-
 def copter_sense(beliefs: dict, pos: tuple) -> None:
-    """
-    Update obstacle beliefs for all cls (in-place) within copter sensor range.
-
-    * AP_c = {O}
-    * Copter's maximum accuracy is 90% (Section 6.1.1):
-        * R = 4
-        * M = 0.4
-    """
+    """update local obstacle beliefs visible to the copter."""
     R, M = 4, 0.4
     for r in range(max(0, pos[0]-R), min(GRID, pos[0]+R+1)):
         for c in range(max(0, pos[1]-R), min(GRID, pos[1]+R+1)):
+            # formula: quartic sensor dome
             beta = sensor_beta(pos, (r, c), R, M)
             if beta <= 0.5:
                 continue
+            # step 1 the copter only updates o, not a/b/c/d
             z = observe(TRUE_L[(r, c)], 'O', beta)
             beliefs[(r, c)]['O'] = bayes_update(beliefs[(r, c)]['O'], z, beta)
 
-
-
-# Copter Exploration #
 def H(b: float) -> float:
-    """
-    Binary Shannon entropy: H(b) = -b log2(b) - (1-b) log2(1-b)    (Section 4.2.2: Eq. 9)
-        * H = 1 when b = 0.5 (maximum uncertainty).
-        * H = 0 when b = 0 or b = 1 (certain).
-        - Clipping prevents log(0).
-    """
+    """binary shannon entropy."""
+    # formula: binary fog score
     b = np.clip(b, 1e-9, 1 - 1e-9)
     return -b * np.log2(b) - (1 - b) * np.log2(1 - b)
 
 def copter_explore(beliefs: dict, copter_pos: tuple, b_max: dict, T_c: int,
                    alpha: float = 1.5, record_beliefs: bool = False) -> tuple:
-    """    
-    Run the copter's global selection-based exploration for T_c steps.
-
-    Acquisition function (Section 4.2.2: Eq. 10):
-        * W(x) = H(B(x|=O)) + α * b_max(x)
-
-    Each step:
-        1. Select x* = argmax W(x), excluding the current cl and already-
-           converged cls (H < 0.05). Exclusion prevents the deadlock where
-           the copter is co-located with the rover (b_max peak) and never moves.
-        2. Take one greedy step toward x* (with 90 % success and 10 % slip).
-        3. Sense from the new position and update beliefs.
-
-    Parameter:
-
-    """
+    """legacy single-target global helper kept for reference."""
     pos = list(copter_pos)
     substeps = []
     belief_snapshots = []
@@ -130,15 +92,9 @@ def copter_explore(beliefs: dict, copter_pos: tuple, b_max: dict, T_c: int,
     return tuple(pos), substeps, belief_snapshots
 
 def _compute_W(beliefs: dict, b_max: dict, alpha: float) -> np.ndarray:
-    """
-    Vectorised acquisition function W(x) for all cls (Section 4.2.2: Eq. 10).
-
-    W(x) = Σ_{ap ∈ AP_c} H(B(x |= ap)) + α · b_max(x)
-         = H(B(x |= O)) + α · b_max(x)                 (since AP_c = {O})
-
-    Return
-        * W : (GRID, GRID) ndarray.
-    """
+    """return the Hashimoto acquisition score over the whole grid."""
+    # formula: hashimoto scout field
+    # w(x) = h(b_o(x)) + alpha * b_max(x)
     b_O = np.array([[beliefs[(r, c)]['O'] for c in range(GRID)]
                      for r in range(GRID)])
     b_O = np.clip(b_O, 1e-9, 1.0 - 1e-9)
@@ -150,14 +106,7 @@ def _compute_W(beliefs: dict, b_max: dict, alpha: float) -> np.ndarray:
     return H_arr + alpha * bmax_arr
 
 def _copter_kernel() -> np.ndarray:
-    """
-    Lazy-build the copter stochastic transition kernel (cached after first call).
-
-    P[a, i, j] = p_c(cl_j | cl_i, action_a)   with p_intended = 0.90.
-
-    Return
-        * P : (|U|, N, N) ndarray,  N = GRID².
-    """
+    """build and cache the stochastic copter kernel for local/global modes."""
     global _P_COPTER
     if _P_COPTER is not None:
         return _P_COPTER
@@ -167,6 +116,7 @@ def _copter_kernel() -> np.ndarray:
         for c in range(GRID):
             i = r * GRID + c
             for a in range(len(ACTIONS)):
+                # formula: stochastic slip kernel
                 for (r2, c2), p in transition_probabilities(r, c, a, 0.90).items():
                     P[a, i, r2 * GRID + c2] = p
     _P_COPTER = P
@@ -175,20 +125,7 @@ def _copter_kernel() -> np.ndarray:
 def copter_explore_local(beliefs: dict, copter_pos: tuple, b_max: dict,
                          T_c: int, alpha: float = 1.5,
                          record_beliefs: bool = False) -> tuple:
-    """
-    Local selection-based copter exploration (Section 4.2.3: Algorithm 2).
-
-    Each step l = 0 … T_c - 1:
-        1. Compute acquisition function W(x) for all x ∈ X.         (Eqs. 9-10)
-        2. Select u* = argmax_u Σ_{x'} p_c(x'|x,u) · W(x').         (Eq. 11)
-           One-step greedy: pick the action whose *expected*
-           next-state acquisition is highest, accounting for slip.
-        3. Sample x_next ~ p_c(·|x, u*) and update position.
-        4. Sense from new position and Bayes-update B.                (Eq. 8)
-
-    Return
-        * (final_pos, substeps, belief_snapshots)
-    """
+    """one-step greedy copter policy with stochastic motion."""
     P   = _copter_kernel()                                            
     N   = GRID * GRID
     pos = list(copter_pos)
@@ -196,19 +133,21 @@ def copter_explore_local(beliefs: dict, copter_pos: tuple, b_max: dict,
     belief_snapshots = []
 
     for _ in range(T_c):  
-        # 1 compute acquisition function W(x)
+        # step 1 score all cells with W(x)
         W_flat = _compute_W(beliefs, b_max, alpha).ravel()            
 
-        # 2 compute optimal control input
+        # step 2 choose the best expected next action
+        # formula: one-step lookahead
+        # q(a) = sum_x' p(x' | x, a) w(x')
         idx = pos[0] * GRID + pos[1]
         Q   = P[:, idx, :] @ W_flat                                  
         best_u = int(np.argmax(Q))                                    
 
-        # 3 apply optimal control input and sample next state        
+        # step 3 sample the next state under the copter kernel
         x_next   = np.random.choice(N, p=P[best_u, idx, :])
         pos = [x_next // GRID, x_next % GRID]
 
-        # 4 sense from new position and update beliefs
+        # step 4 sense from the realized position
         copter_sense(beliefs, tuple(pos))                             
         substeps.append(tuple(pos))
         if record_beliefs:
@@ -219,21 +158,7 @@ def copter_explore_local(beliefs: dict, copter_pos: tuple, b_max: dict,
 def copter_explore_global(beliefs: dict, copter_pos: tuple, b_max: dict,
                           T_c: int, alpha: float = 1.5,
                           record_beliefs: bool = False) -> tuple:
-    """
-    Global selection-based copter exploration (Section 4.2.3: Algorithm 3).
-
-    Outer loop (while l < T_c - 1):
-        1. Compute W(x) for all x ∈ X.                               (Eqs. 9-10)
-        2. Select x* = argmax_{x' ∈ X} W(x').                        (Eq. 12)
-           Solve copter reaching VI to get μ*_c2.                     (Eq. 13)
-        3. Inner loop: follow μ*_c2 toward x*, sensing at each step.
-        4. On reaching x*, recompute W with updated beliefs and
-           select a new x* (beliefs change as the copter senses
-           along the way).
-
-    Return
-        * (final_pos, substeps, belief_snapshots)
-    """
+    """global target-selection copter policy with stochastic motion."""
     P   = _copter_kernel()                                            
     N   = GRID * GRID
     pos = list(copter_pos)
@@ -242,27 +167,28 @@ def copter_explore_global(beliefs: dict, copter_pos: tuple, b_max: dict,
     l = 0                                                           
 
     while l < T_c - 1:                                              
-
-        # 1 compute compute acquisition function W(x)
+        # step 1 choose the current best target cell
+        # formula: greedy beacon pick
         W = _compute_W(beliefs, b_max, alpha)                        
-
-        # 2 compute optimal target cl and optimal control input
         x_star = divmod(int(np.argmax(W)), GRID)                      
 
+        # step 1b solve the finite-horizon reaching value iteration
+        # formula: reach-the-beacon bellman
         target_idx = x_star[0] * GRID + x_star[1]
         V = np.zeros(N)
         V[target_idx] = 1.0
-        for _ in range(50):
-            QV    = P @ V                                             
-            V_new = np.max(QV, axis=0)                                
-            V_new[target_idx] = 1.0
-            if np.max(np.abs(V_new - V)) < 1e-4:
-                break
-            V = V_new
-        reach_policy = np.argmax(P @ V, axis=0)                      
+        with np.errstate(divide='ignore', over='ignore', invalid='ignore'):
+            for _ in range(50):
+                QV    = P @ V
+                V_new = np.clip(np.max(QV, axis=0), 0.0, 1.0)
+                V_new[target_idx] = 1.0
+                if np.max(np.abs(V_new - V)) < 1e-4:
+                    break
+                V = V_new
+            reach_policy = np.argmax(P @ V, axis=0)
         reach_policy[target_idx] = 0
 
-        # (guard) already at x*: sense once, consume one step, reselect
+        # step 1a if already at the target, sense and reselect
         if tuple(pos) == x_star:
             copter_sense(beliefs, tuple(pos))
             substeps.append(tuple(pos))
@@ -271,19 +197,18 @@ def copter_explore_global(beliefs: dict, copter_pos: tuple, b_max: dict,
             l += 1
             continue
 
-        # 3 follow reaching policy toward x*
+        # step 2 follow the reaching policy toward that target
         while tuple(pos) != x_star and l < T_c - 1:                
 
-            # 3.1 apply μ*_c2 and sample next state
             idx = pos[0] * GRID + pos[1]
             a   = int(reach_policy[idx])
+            # formula: stochastic slip kernel
             j   = np.random.choice(N, p=P[a, idx, :])                
 
-            # 3.2 update position and step counter
             pos = [j // GRID, j % GRID]
             l += 1
 
-            # 3.3 sense from new position and update beliefs
+            # step 3 sense from the realized position
             copter_sense(beliefs, tuple(pos))                         
             substeps.append(tuple(pos))
             if record_beliefs:
@@ -291,13 +216,225 @@ def copter_explore_global(beliefs: dict, copter_pos: tuple, b_max: dict,
 
     return tuple(pos), substeps, belief_snapshots
 
-#  Rover Mission Execution #
+def _copter_move(pos: list, action: int) -> list:
+    """Execute copter action: deterministic motion (formulation §2/§5)."""
+    # step 1 utility mode uses the clipped deterministic motion map
+    dr, dc = ACTIONS[action]
+    nr, nc = clip(pos[0] + dr, pos[1] + dc)
+    return [nr, nc]
+
+def _utility_rollout_cache(remaining: int):
+    """cache all action sequences and motion deltas for one horizon.
+
+    for a remaining horizon H, the exhaustive copter solver evaluates M = 8^H
+    discrete action sequences. this cache materializes that action space once:
+
+    - sequence_actions[m, t] is the t-th action in sequence m
+    - row_delta_by_sequence and col_delta_by_sequence store the per-step motion
+    - step_length_by_sequence stores the euclidean move length per step
+
+    the vectorized rollout then applies the same recurrence to every candidate
+    sequence in parallel:
+
+        r_{m,t+1} = clip(r_{m,t} + delta_r[m,t])
+        c_{m,t+1} = clip(c_{m,t} + delta_c[m,t])
+
+    so the later scoring step can batch all M candidates without changing the
+    underlying exhaustive search.
+    """
+    cached_rollout = _UTILITY_ROLLOUT_CACHE.get(remaining)
+    if cached_rollout is not None:
+        return cached_rollout
+
+    from itertools import product as iproduct
+
+    sequence_actions = np.array(
+        list(iproduct(range(1, len(ACTIONS)), repeat=remaining)),
+        dtype=np.int8,
+    )
+    action_row_delta = np.array(
+        [dr for dr, _ in ACTIONS],
+        dtype=np.int8,
+    )
+    action_col_delta = np.array(
+        [dc for _, dc in ACTIONS],
+        dtype=np.int8,
+    )
+    action_step_length = np.hypot(
+        action_row_delta.astype(np.float64),
+        action_col_delta.astype(np.float64),
+    )
+
+    cached_rollout = {
+        'sequence_actions': sequence_actions,
+        'row_delta_by_sequence': action_row_delta[sequence_actions],
+        'col_delta_by_sequence': action_col_delta[sequence_actions],
+        'step_length_by_sequence': action_step_length[sequence_actions],
+        'sequence_index': np.arange(len(sequence_actions)),
+    }
+    _UTILITY_ROLLOUT_CACHE[remaining] = cached_rollout
+    return cached_rollout
+
+def copter_explore_utility(beliefs: dict, copter_pos: tuple, b_max: dict,
+                           T_c: int, alpha: float = 1.5,
+                           record_beliefs: bool = False,
+                           lambda_: float = 0.0,
+                           rover_pos: tuple = (0, 0),
+                           energy: float = float('inf')) -> tuple:
+    """deterministic exhaustive copter search over the remaining horizon.
+
+    the optimized implementation is still the same exact maximization over the
+    discrete action space. for the remaining horizon H, it scores all
+    M = 8^H candidate sequences by
+
+        score_m = alpha I_m - lambda C_c,m
+
+    in parallel. if sequence m visits cells x_{m,1}, ..., x_{m,H}, then
+
+        C_c,m = sum_t 1[moved_{m,t}] * ||delta_{m,t}||_2
+                + rho * ||x_{m,H} - x_r||_2
+
+    and
+
+        I_m = sum_x 1[x is newly seen by sequence m] * H(B_O(x))
+
+    the boolean matrix seen_by_sequence[m, x] preserves the exact old semantics
+    that repeated visits within one sequence only count once. the solver still
+    returns the first action of the best feasible sequence, but the rollout and
+    scoring are vectorized across all candidates.
+    """
+    pos = list(copter_pos)
+    visited_global = {tuple(pos)}
+    substeps = []
+    belief_snapshots = []
+    RHO = 1.0
+
+    for step in range(T_c):
+        remaining = T_c - step
+
+        # step 1 cache the entropy reward of unseen cells
+        # formula: entropy scout bonus
+        # only cells not yet visited in this epoch can contribute new i(a_c)
+        obstacle_belief_flat = np.array(
+            [beliefs[(r, c)]['O'] for r in range(GRID) for c in range(GRID)],
+            dtype=np.float64,
+        )
+        unseen_cell_mask = np.ones(GRID * GRID, dtype=bool)
+        for r, c in visited_global:
+            unseen_cell_mask[r * GRID + c] = False
+        entropy_flat = np.zeros(GRID * GRID, dtype=np.float64)
+        unseen_obstacle_belief = np.clip(
+            obstacle_belief_flat[unseen_cell_mask],
+            1e-9,
+            1.0 - 1e-9,
+        )
+        entropy_flat[unseen_cell_mask] = (
+            -unseen_obstacle_belief * np.log2(unseen_obstacle_belief)
+            - (1.0 - unseen_obstacle_belief) * np.log2(1.0 - unseen_obstacle_belief)
+        )
+
+        # step 2 score staying for the rest of the epoch
+        # formula: stay-put baseline
+        d_return_now = abs(pos[0] - rover_pos[0]) + abs(pos[1] - rover_pos[1])
+        best_score = -lambda_ * RHO * d_return_now
+        best_action = 0
+
+        # step 3 score every remaining action sequence
+        # formula: batch rollout over m = 8^h candidates
+        rollout_cache = _utility_rollout_cache(remaining)
+        sequence_actions = rollout_cache['sequence_actions']
+        row_delta_by_sequence = rollout_cache['row_delta_by_sequence']
+        col_delta_by_sequence = rollout_cache['col_delta_by_sequence']
+        step_length_by_sequence = rollout_cache['step_length_by_sequence']
+        sequence_index = rollout_cache['sequence_index']
+
+        row_position = np.full(len(sequence_actions), pos[0], dtype=np.int16)
+        col_position = np.full(len(sequence_actions), pos[1], dtype=np.int16)
+        flight_cost = np.zeros(len(sequence_actions), dtype=np.float64)
+        information_gain = np.zeros(len(sequence_actions), dtype=np.float64)
+        seen_by_sequence = np.zeros(
+            (len(sequence_actions), GRID * GRID),
+            dtype=bool,
+        )
+
+        for horizon_index in range(remaining):
+            # step 3a apply the deterministic motion recurrence to every sequence
+            next_row_position = np.clip(
+                row_position + row_delta_by_sequence[:, horizon_index],
+                0,
+                GRID - 1,
+            )
+            next_col_position = np.clip(
+                col_position + col_delta_by_sequence[:, horizon_index],
+                0,
+                GRID - 1,
+            )
+            moved = (
+                (next_row_position != row_position)
+                | (next_col_position != col_position)
+            )
+
+            # formula: copter trip ledger
+            flight_cost += moved * step_length_by_sequence[:, horizon_index]
+
+            row_position = next_row_position
+            col_position = next_col_position
+            cell_index = row_position * GRID + col_position
+
+            # formula: set-once scout bonus
+            # repeated visits in one sequence count once, matching the old set
+            newly_seen = (
+                unseen_cell_mask[cell_index]
+                & ~seen_by_sequence[sequence_index, cell_index]
+            )
+            information_gain += newly_seen * entropy_flat[cell_index]
+            seen_by_sequence[sequence_index, cell_index] = True
+
+        # formula: frozen-return leash
+        return_cost = RHO * np.hypot(
+            row_position - rover_pos[0],
+            col_position - rover_pos[1],
+        )
+        total_cost = flight_cost + return_cost
+        feasible_sequence = total_cost <= energy
+        if np.any(feasible_sequence):
+            # formula: copter surrogate utility
+            # score = alpha * i - lambda * c_c
+            score_by_sequence = alpha * information_gain - lambda_ * total_cost
+            feasible_score = np.where(
+                feasible_sequence,
+                score_by_sequence,
+                -np.inf,
+            )
+            best_sequence_index = int(np.argmax(feasible_score))
+            candidate_score = float(feasible_score[best_sequence_index])
+            if candidate_score > best_score:
+                best_score = candidate_score
+                best_action = int(sequence_actions[best_sequence_index, 0])
+
+        # step 4 staying means the epoch is done
+        if best_action == 0:
+            for _ in range(remaining):
+                copter_sense(beliefs, tuple(pos))
+                substeps.append(tuple(pos))
+                if record_beliefs:
+                    belief_snapshots.append(copy.deepcopy(beliefs))
+            break
+
+        # step 5 execute the first move of the best sequence
+        pos = _copter_move(pos, best_action)
+        visited_global.add(tuple(pos))
+        copter_sense(beliefs, tuple(pos))
+        substeps.append(tuple(pos))
+        if record_beliefs:
+            belief_snapshots.append(copy.deepcopy(beliefs))
+
+    return tuple(pos), substeps, belief_snapshots
+
 def rover_execute(beliefs: dict, rover_pos: tuple, rover_q: int,
                   policy: dict, T_r: int,
                   record_beliefs: bool = False) -> tuple:
-    """
-
-    """
+    """execute the rover policy for at most t_r steps."""
     pos              = list(rover_pos)
     q                = rover_q
     substeps         = [(tuple(pos), q)]
@@ -307,22 +444,55 @@ def rover_execute(beliefs: dict, rover_pos: tuple, rover_q: int,
         if q in FSA_ACCEPT or q == FSA_DEAD:
             break
 
+        # step 1 read the committed action from the current rover policy
         a = policy.get((pos[0], pos[1], q), 1)
         dr, dc = ACTIONS[a]
         nr, nc = clip(pos[0] + dr, pos[1] + dc)
 
-        if np.random.rand() < 0.95:
-            pos = [nr, nc]
-        else:
-            slips = [list(clip(nr + ddr, nc + ddc))
-                     for ddr, ddc in CARDINALS
-                     if clip(nr + ddr, nc + ddc) != (nr, nc)]
-            pos = random.choice(slips) if slips else [nr, nc]
+        # step 2 apply deterministic rover motion
+        pos = [nr, nc]
 
+        # step 3 update the realized automaton state with true labels
         q = fsa_step(q, TRUE_L[tuple(pos)])
+
+        # step 4 fuse the rover's local observation into the shared belief map
         rover_sense(beliefs, tuple(pos))
         substeps.append((tuple(pos), q))
         if record_beliefs:
             belief_snapshots.append(copy.deepcopy(beliefs))
 
     return tuple(pos), q, substeps, belief_snapshots
+
+
+def compute_u_c(V: dict, beliefs: dict, rover_pos: tuple, rover_q: int,
+                copter_substeps: list, alpha: float, lambda_: float,
+                rho: float = 1.0) -> float:
+    """compute the logged copter utility used by the acceptance gate."""
+    # approximation note: this uses the planner value v at the current rover
+    # state as a proxy for the shared mission term g. that matches the shipped
+    # surrogate gate, but is not a full re-evaluation of the counterfactual
+    # rover best response for each copter trajectory.
+
+    # formula: mission logscore proxy
+    V_phi = V.get((rover_pos[0], rover_pos[1], rover_q), 0.0)
+
+    # formula: entropy scout bonus
+    observed = set(copter_substeps)
+    I = sum(H(beliefs[pos]['O']) for pos in observed)
+
+    # formula: copter trip ledger
+    C_c = 0.0
+    for k in range(len(copter_substeps) - 1):
+        dr = copter_substeps[k][0] - copter_substeps[k+1][0]
+        dc = copter_substeps[k][1] - copter_substeps[k+1][1]
+        C_c += math.sqrt(dr*dr + dc*dc)
+    if copter_substeps:
+        dr = copter_substeps[-1][0] - rover_pos[0]
+        dc = copter_substeps[-1][1] - rover_pos[1]
+        C_c += rho * math.sqrt(dr*dr + dc*dc)
+
+    # formula: mission logscore
+    G = np.log(np.clip(V_phi, 1e-9, 1.0))
+
+    # formula: copter utility ledger
+    return G + alpha * I - lambda_ * C_c

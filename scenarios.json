@@ -1,0 +1,42 @@
+[
+  {
+    "name": "_rover_private_only",
+    "rover_start": [0, 0],
+    "copter_start": [0, 0],
+    "T_c": 5, "T_r": 3, "alpha": 1.5,
+    "gamma": 2.0, "lambda": 0.0,
+    "vi_steps": 80, "max_k": 600,
+    "copter_mode": "utility",
+    "seed": 12
+  },
+  {
+    "name": "_copter_private_only",
+    "rover_start": [0, 0],
+    "copter_start": [0, 0],
+    "T_c": 5, "T_r": 3, "alpha": 1.5,
+    "gamma": 0.01, "lambda": 1.0,
+    "vi_steps": 80, "max_k": 600,
+    "copter_mode": "utility",
+    "seed": 12
+  },
+  {
+    "name": "_both_private",
+    "rover_start": [0, 0],
+    "copter_start": [0, 0],
+    "T_c": 5, "T_r": 3, "alpha": 1.5,
+    "gamma": 2.0, "lambda": 1.0,
+    "vi_steps": 80, "max_k": 600,
+    "copter_mode": "utility",
+    "seed": 12
+  },
+    {
+    "name": "_hashimoto_baseline",
+    "rover_start": [0, 0],
+    "copter_start": [0, 0],
+    "T_c": 5, "T_r": 3, "alpha": 1.5,
+    "gamma": 0.0, "lambda": 0.0,
+    "vi_steps": 80, "max_k": 600,
+    "copter_mode": "global",
+    "seed": 12
+  }
+]

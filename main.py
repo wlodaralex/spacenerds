@@ -1,132 +1,75 @@
-"""
-main.py - Entry point for collaborative rover-copter simulation.
+"""run scenarios and generate output artifacts."""
 
-Reference:
-    [1] K. Hashimoto, N. Tsumagari, and T. Ushio, 'Collaborative Rover-copter 
-        Path Planning and Exploration with Temporal Logic Specifications Based 
-        on Bayesian Update Under Uncertain Environments', ACM Transactions on 
-        Cyber-Physical Systems, vol. 6, no. 2, pp. 1-24, Apr. 2022.
-
-Usage:
-    - Run `python main.py` from directory (where all module files exist).
-    - Visualizations written to outpath defined.
-
-Scenario(s):
-    - By default, only one scenario is displayed (seen below).
-    - To simulate other scenarios in same run, modify the relevant section.
-
-Model parameters (Section 6.1.1):
-    - T_c = 5:
-        * Copter exploration phase length. Each cycle the copter takes T_c steps, sensing obstacle labels (AP_c = {O}) and updating beliefs.
-    - T_r = 3:
-        * Rover execution phase length. Each cycle the rover follows its optimal policy (synthesized via value iteration) for T_r steps before replanning.
-        * NOTE: T_r > 5 may cause rover to appear stuck due to a stay-action V-peak trap (see CHANGELOG.md).
-    - alpha = 1.5:
-        * Eq. 10: Acquisition weight in W(x) = H(B(x|=O)) + alpha * b_max(x).
-        * Balances entropy-driven exploration versus rover-path-biased exploration.
-        * Higher values pull the copter toward cells the rover is likely to visit.
-
-Implementation parameters:
-    - vi_steps: Number of value-iteration sweeps (Eqs. 20-21). The paper assumes convergence to the optimal policy μ* 
-                but does not specify a sweep count, in practice the algorithm is run to convergence. 
-    - max_k: Hard time limit (total timesteps) added for computational practicality. Prevents the simulation 
-             from running indefinitely if beliefs do not converge or the rover cannot find a path.
-    - copter_mode: Selects the copter exploration algorithm.
-        * 'local' -> Algorithm 2 (local selection-based exploration, Eq. 11).
-        * 'global' -> Algorithm 3 (global selection-based exploration, Eqs. 12-13).
-    - seed: Fixes the pseudo-random state for stochastic transitions and sensor noise, ensuring results are reproducible across runs.
-            Added for scientific reproducibility and presentation consistency (the same seed produces the same trajectory every run).
-    - store_belief_history: When 'True', records a full deepcopy of the 10x10 belief grid at every timestep k (required for some visualizations).
-                            Can be disabled for large-scale testing to limit memory use and reduce runtime.
-"""
-
+import json
 import os
 import time
 import numpy as np
 from simulation import run_simulation
 from visualization import *
 
-# Create output directory in user's home folder
-BASE_DIR = os.path.dirname(os.path.abspath(__file__)) # spacenerds directory
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 outpath = os.path.join(BASE_DIR, "outputs")
+
+def _load_scenarios(path: str) -> list:
+    """load scenarios and normalize tuple fields."""
+    with open(path) as f:
+        raw = json.load(f)
+    for s in raw:
+        s['rover_start']  = tuple(s['rover_start'])
+        s['copter_start'] = tuple(s['copter_start'])
+    return raw
+
 
 def main():
     os.makedirs(outpath, exist_ok=True)
 
-    scenarios = [
-        {
-            'name': '_global',
-            'rover_start': (0, 0),
-            'copter_start': (0, 0),
-            'T_c': 5,
-            'T_r': 3,
-            'alpha': 1.5,
-            'vi_steps': 80,
-            'max_k': 600,
-            'copter_mode': 'global',
-            'seed': 12,
-            'store_belief_history': True,
-        },
-            {
-            'name': '_local',
-            'rover_start': (0, 0),
-            'copter_start': (0, 0),
-            'T_c': 5,
-            'T_r': 3,
-            'alpha': 1.5,
-            'vi_steps': 80,
-            'max_k': 600,
-            'copter_mode': 'local',
-            'seed': 12,
-            'store_belief_history': True,
-        },
-    ]
+    scenarios = _load_scenarios(os.path.join(BASE_DIR, 'scenarios.json'))
 
     for scenario in scenarios:
-        print("\n" + "=" * 60)
         print(f"SCENARIO {scenario['name']}  |  rover_start={scenario['rover_start']}, copter_start={scenario['copter_start']}")
-        print("=" * 60)
 
+        # step 1 run one scenario
+        start_time = time.perf_counter()
         hist = run_simulation(
             rover_start=scenario['rover_start'],
             copter_start=scenario['copter_start'],
             T_c=scenario['T_c'],
             T_r=scenario['T_r'],
             alpha=scenario['alpha'],
+            gamma=scenario.get('gamma', scenario.get('gamma', 0.0)),
+            lambda_=scenario.get('lambda', 0.0),
+            tau_r=scenario.get('tau_r', 1.0),
             vi_steps=scenario['vi_steps'],
             max_k=scenario['max_k'],
             copter_mode=scenario.get('copter_mode', 'global'),
             seed=scenario['seed'],
-            store_belief_history=scenario['store_belief_history'],
+            copter_energy=scenario.get('copter_energy') or float('inf'),
         )
+        solve_time_s = time.perf_counter() - start_time
+        hist['scenario_name'] = scenario['name']
+        hist['solve_time_s'] = solve_time_s
+        hist['gamma'] = scenario.get('gamma', 0.0)
+        hist['lambda'] = scenario.get('lambda', 0.0)
 
+        # step 2 save outputs
         prefix = os.path.join(outpath, f"scen{scenario['name']}")
+        hist.save(f"scen{scenario['name']}", outdir=outpath)
+        legacy = hist.to_legacy_dict()
 
-        make_belief_snapshots_plot(hist, filepath=prefix + "_belief_snapshots.png")
-        make_trajectories_plot(hist, filepath=prefix + "_trajectories.png", use_substeps=True)
-        make_final_beliefs_plot(hist, filepath=prefix + "_final_beliefs.png")
-        make_v_fxn_heatmap(hist['beliefs_snapshot'][0], filepath=prefix + "_value_function_q0.png", rover_pos=scenario['rover_start'], rover_q=0)
-        make_convergence_plot(hist, filepath=prefix + "_convergence.png")
-        make_beliefs_animation(hist, filepath=prefix + "_beliefs_animation.mp4", fps=4, use_substeps=True)
-        make_unified_animation(hist, filepath=prefix + "_unified_animation.mp4", fps=4, use_substeps=True)
+        # optional plots
+        # make_belief_snapshots_plot(legacy, filepath=prefix + "_belief_snapshots.png")
+        make_trajectories_plot(legacy, filepath=prefix + "_trajectories.png", use_substeps=True)
+        # make_final_beliefs_plot(legacy, filepath=prefix + "_final_beliefs.png")
+        # make_v_fxn_heatmap(legacy['beliefs_snapshot'][0], filepath=prefix + "_value_function_q0.png", rover_pos=scenario['rover_start'], rover_q=0)
+        make_convergence_plot(legacy, filepath=prefix + "_convergence.png")
+        # make_beliefs_animation(legacy, filepath=prefix + "_beliefs_animation.mp4", fps=4, use_substeps=True)
+        # make_unified_animation(legacy, filepath=prefix + "_unified_animation.mp4", fps=4, use_substeps=True)
     
     print("\n Outputs saved to:", outpath)
 
 
 def table1_experiment(n_trials=100, max_k=300, meta_seed=0):
-    """
-    Reproduce Table 1 from the paper (Section 6.1.2).
-
-    For each trial:
-        1. Randomly sample rover and copter start positions from X.
-        2. Run Algorithm 1 with local exploration  (Algorithm 2).
-        3. Run Algorithm 1 with global exploration (Algorithm 3).
-    Both use the same start positions and per-trial seed.
-
-    Report:
-        * Number of missions completed before k = max_k.
-        * Average running time (s) per simulation.
-    """
+    """reproduce the local/global baseline table."""
     from environment import GRID, TRUE_L
 
     rng = np.random.RandomState(meta_seed)
@@ -154,11 +97,12 @@ def table1_experiment(n_trials=100, max_k=300, meta_seed=0):
             hist = run_simulation(
                 rover_start=rover,
                 copter_start=copter,
-                T_c=5, T_r=3, alpha=1.5, vi_steps=80,
+                T_c=5, T_r=3, alpha=1.5,
+                gamma=0.0, lambda_=0.0,
+                vi_steps=80,
                 max_k=max_k,
                 copter_mode=mode,
                 seed=seed_i,
-                store_belief_history=False,
             )
             elapsed = time.time() - t0
             results[mode]['times'].append(elapsed)
@@ -188,5 +132,5 @@ def table1_experiment(n_trials=100, max_k=300, meta_seed=0):
 
 
 if __name__ == '__main__':
-    # main()
-    table1_experiment(n_trials=100, max_k=300, meta_seed=0)
+    main()
+    # table1_experiment(n_trials=100, max_k=300, meta_seed=0)

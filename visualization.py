@@ -1,6 +1,4 @@
-"""
-visualization.py 
-"""
+"""static plots and animations for recorded runs."""
 
 import numpy as np
 import matplotlib
@@ -10,9 +8,8 @@ import matplotlib.patches as mpatches
 from matplotlib.animation import FuncAnimation, FFMpegWriter
 
 from environment      import GRID, AP_LIST, TRUE_L
-from planning import value_iteration
+from planning import grid_to_graph, d_star_lite_plan
 
-# Colour scheme for each atomic proposition
 AP_COLORS = {
     'O': 'red',
     'A': 'blue',
@@ -22,13 +19,33 @@ AP_COLORS = {
 }
 
 
+def _format_run_metadata(history: dict) -> str:
+    """build one compact metadata string for figure titles."""
+    gamma = history.get('gamma')
+    lambda_ = history.get('lambda_', history.get('lambda'))
+    rover_path_length = history.get('rover_path_length')
+    copter_path_length = history.get('copter_path_length')
+    solve_time_s = history.get('solve_time_s')
+
+    fields = []
+    if gamma is not None:
+        fields.append(f'gamma={gamma:g}')
+    if lambda_ is not None:
+        fields.append(f'lambda={lambda_:g}')
+    if rover_path_length is not None:
+        fields.append(f'L_r={rover_path_length:.2f}')
+    if copter_path_length is not None:
+        fields.append(f'L_c={copter_path_length:.2f}')
+    if solve_time_s is not None:
+        fields.append(f'solve={solve_time_s:.2f}s')
+    return '  |  '.join(fields)
+
+
 
 
 def plot_belief_map(ax, beliefs: dict, ap: str,
                     rover_pos=None, copter_pos=None) -> None:
-    """
-
-    """
+    """draw one belief panel for one atomic proposition."""
     grid = np.array([[beliefs[(r, c)][ap] for c in range(GRID)]
                      for r in range(GRID)])
     im = ax.imshow(grid, vmin=0, vmax=1, cmap='gray_r', origin='upper',
@@ -56,9 +73,7 @@ def plot_belief_map(ax, beliefs: dict, ap: str,
 
 
 def make_belief_snapshots_plot(history: dict, filepath: str) -> None:
-    """
-
-    """
+    """plot sparse belief snapshots over the run."""
     which = history.get('which_phi', '')
     if 'φ1' in str(which):
         APs, fig_cols = ['A', 'O'], 2
@@ -91,9 +106,12 @@ def make_belief_snapshots_plot(history: dict, filepath: str) -> None:
 
     status = (f"Complete via {which}" if history['complete'] else
               ("Failed (obstacle)" if history['fail'] else "Timeout"))
+    name   = history.get('scenario_name', '')
+    metadata = _format_run_metadata(history)
+    subtitle = metadata if metadata else '(Blue ● = rover  |  Red ● = copter  |  dark = high belief)'
     fig.suptitle(
-        f'Environmental Belief Snapshots  —  {status}\n'
-        '(Blue ● = rover  |  Red ● = copter  |  dark = high belief)',
+        f'[{name}]  Environmental Belief Snapshots  —  {status}\n'
+        f'{subtitle}',
         fontsize=11, y=1.01)
     plt.tight_layout()
     fig.savefig(filepath, dpi=150, bbox_inches='tight')
@@ -103,9 +121,7 @@ def make_belief_snapshots_plot(history: dict, filepath: str) -> None:
 
 def make_trajectories_plot(history: dict, filepath: str,
                          use_substeps: bool = True) -> None:
-    """
-
-    """
+    """plot rover and copter trajectories on the map."""
     fig, ax = plt.subplots(figsize=(7, 7))
 
     for i in range(GRID + 1):
@@ -137,7 +153,12 @@ def make_trajectories_plot(history: dict, filepath: str,
     which  = history.get('which_phi', '')
     status = (f"Complete via {which}" if history['complete'] else
               ("Failed" if history['fail'] else "Timeout"))
-    ax.set_title(f'Trajectories  (k={history["k_final"]})  —  {status}',
+    name   = history.get('scenario_name', '')
+    metadata = _format_run_metadata(history)
+    title = f'[{name}]  Trajectories  (k={history["k_final"]})  —  {status}'
+    if metadata:
+        title += f'\n{metadata}'
+    ax.set_title(title,
                  fontsize=11)
     ax.set_xlim(-0.5, GRID - 0.5)
     ax.set_ylim(GRID - 0.5, -0.5)
@@ -158,7 +179,12 @@ def make_final_beliefs_plot(history: dict, filepath: str) -> None:
         plot_belief_map(axes[i], beliefs, ap,
                         rover_pos  = history['final_rover'],
                         copter_pos = history['final_copter'])
-    fig.suptitle('Final Belief Maps (all APs)', fontsize=12)
+    name = history.get('scenario_name', '')
+    metadata = _format_run_metadata(history)
+    title = f'[{name}]  Final Belief Maps (all APs)'
+    if metadata:
+        title += f'\n{metadata}'
+    fig.suptitle(title, fontsize=12)
     plt.tight_layout()
     fig.savefig(filepath, dpi=150, bbox_inches='tight')
     plt.close(fig)
@@ -166,10 +192,8 @@ def make_final_beliefs_plot(history: dict, filepath: str) -> None:
 
 
 def make_v_fxn_heatmap(beliefs: dict, filepath: str, rover_pos: tuple, rover_q: int) -> None:
-    """
-
-    """
-    V, _, _ = value_iteration(beliefs, vi_steps=80)
+    """plot one rover value-function heatmap."""
+    V, _, _ = d_star_lite_plan(grid_to_graph(), beliefs)
     grid  = np.array([[V.get((r, c, rover_q), 0.0) for c in range(GRID)]
                       for r in range(GRID)])
     fig, ax = plt.subplots(figsize=(7, 7))
@@ -191,12 +215,10 @@ def make_v_fxn_heatmap(beliefs: dict, filepath: str, rover_pos: tuple, rover_q: 
 
 def make_convergence_plot(history: dict, filepath: str,
                           obstacle_cells=None, free_cells=None) -> None:
-    """
-
-    """
+    """plot obstacle-belief convergence for obstacle and free cells."""
     belief_history = history.get('belief_history')
     if belief_history is None:
-        print("  make_convergence_plot: need store_belief_history=True")
+        print("  make_convergence_plot: belief history missing from history object")
         return
 
     k_list = history['k_list']
@@ -210,9 +232,14 @@ def make_convergence_plot(history: dict, filepath: str,
                       if not lbl and rc[0] < 5][:3]
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+    name = history.get('scenario_name', '')
+    metadata = _format_run_metadata(history)
+    title = f'[{name}]  belief convergence\n'
+    if metadata:
+        title += metadata + '\n'
+    title += 'obstacle cells: B(x|=O) -> 1   |   free cells: B(x|=O) -> 0'
     fig.suptitle(
-        'Belief Convergence  (Theorem 1)\n'
-        'Obstacle cells — B(x|=O) → 1   |   Free cells — B(x|=O) → 0',
+        title,
         fontsize=11)
 
     colors_obs  = ['#d62728', '#e377c2', '#ff7f0e']
@@ -254,9 +281,7 @@ def make_convergence_plot(history: dict, filepath: str,
 
 
 def _subsample_for_cycles(history: dict, belief_history: list) -> tuple:
-    """
-
-    """
+    """downsample full step history to one sample per cycle."""
     rover_path  = history['rover_path']
     copter_path = history['copter_path']
     n_cycles    = len(rover_path)
@@ -279,17 +304,7 @@ def _subsample_for_cycles(history: dict, belief_history: list) -> tuple:
 
 def make_beliefs_animation(history: dict, filepath: str,
                    fps: int = 4, use_substeps: bool = True) -> None:
-    """
-    Animate per-AP belief panels.
-
-    APs shown depend on which mission branch completed:
-      φ1 → [A, O]       φ2 → [B, C, O]       φ3 → [C, D, O]
-
-    use_substeps=True  (default): one frame per timestep k — smooth.
-    use_substeps=False: one frame per planning cycle — fast preview,
-                        but last frame is guaranteed to show the true
-                        final k and belief state (FIX 9).
-    """
+    """animate belief maps over time."""
     which = history.get('which_phi', '')
     APs   = (['A', 'O']      if 'φ1' in str(which) else
              ['B', 'C', 'O'] if 'φ2' in str(which) else
@@ -297,7 +312,7 @@ def make_beliefs_animation(history: dict, filepath: str,
 
     belief_history = history.get('belief_history')
     if belief_history is None:
-        print("  No belief history. Run with store_belief_history=True.")
+        print("  no belief history available in history object")
         return
 
     if use_substeps and 'rover_substeps' in history:
@@ -352,8 +367,8 @@ def make_beliefs_animation(history: dict, filepath: str,
 
         k_val  = k_list[min(i, len(k_list) - 1)]
         phase  = phase_list[min(i, len(phase_list) - 1)] if phase_list else '?'
-        pstr   = {'C': 'Copter exploring', 'R': 'Rover executing',
-                  'W': 'Warmup', 'I': 'Init', 'E': 'End'}.get(phase, phase)
+        pstr   = {'C': 'copter exploring', 'R': 'rover executing',
+                  'W': 'warmup', 'I': 'init', 'E': 'end'}.get(phase, phase)
         fig.suptitle(f'k = {k_val}   [{pstr}]', fontsize=12, fontweight='bold')
 
     anim = FuncAnimation(fig, draw_frame, frames=n_frames, interval=200)
@@ -363,12 +378,10 @@ def make_beliefs_animation(history: dict, filepath: str,
 
 def make_unified_animation(history: dict, filepath: str,
                            fps: int = 4, use_substeps: bool = True) -> None:
-    """
-
-    """
+    """animate trajectories and obstacle beliefs together."""
     belief_history = history.get('belief_history')
     if belief_history is None:
-        print("  Need store_belief_history=True")
+        print("  no belief history available in history object")
         return
 
     if use_substeps and 'rover_substeps' in history:
@@ -419,11 +432,13 @@ def make_unified_animation(history: dict, filepath: str,
         for ap in AP_LIST
     }
 
+    name = history.get('scenario_name', '')
+    fig.suptitle(f'[{name}]', fontsize=10, y=0.97)
     title = ax.set_title('k = 0', fontsize=13, fontweight='bold', pad=10)
     ax.legend(handles=[
-        mpatches.Patch(color='deepskyblue', label='Rover'),
-        mpatches.Patch(color='tomato',      label='Copter'),
-        mpatches.Patch(color='#555',        label='High obstacle belief'),
+        mpatches.Patch(color='deepskyblue', label='rover'),
+        mpatches.Patch(color='tomato',      label='copter'),
+        mpatches.Patch(color='#555',        label='high obstacle belief'),
     ], loc='lower right', fontsize=8)
 
     def update(i):
@@ -454,8 +469,8 @@ def make_unified_animation(history: dict, filepath: str,
 
         k_val = k_list[min(i, len(k_list) - 1)]
         phase = phase_list[min(i, len(phase_list) - 1)] if phase_list else '?'
-        pstr  = {'C': 'Copter exploring', 'R': 'Rover executing',
-                 'W': 'Warmup', 'I': 'Init', 'E': 'End'}.get(phase, phase)
+        pstr  = {'C': 'copter exploring', 'R': 'rover executing',
+                 'W': 'warmup', 'I': 'init', 'E': 'end'}.get(phase, phase)
         title.set_text(f'k = {k_val}   [{pstr}]')
         return ([im_obs, rover_dot, copter_dot, rover_trail, copter_trail, title]
                 + list(revealed_texts.values()))
@@ -468,9 +483,7 @@ def make_unified_animation(history: dict, filepath: str,
 
 
 def _save_animation(anim, filepath: str, fps: int) -> None:
-    """
-    
-    """
+    """save an animation as mp4, with gif fallback."""
     try:
         writer = FFMpegWriter(fps=fps, bitrate=1800)
         anim.save(filepath, writer=writer)
