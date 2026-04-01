@@ -1,8 +1,31 @@
-"""rover planning on the product graph x × q."""
+"""
+planning.py - Value iteration (VI) and reachability belief (b_max).
 
-import heapq
-import math
-from collections import deque
+Setup:
+    - Copter planning pipeline:
+        - Value iteration
+
+    - Rover planning pipeline:
+        - Value iteration over the product belief MDP (Section 4.3.2: Eqs. 20-21 & Algorithm 4).
+        - Reachability belief b_max used by the copter's acquisition function to bias 
+          exploration toward the rover's likely path (Section 4.3.3).
+
+    - Product MDP state space - (cell, FSA_state) (Section 4.3.2 Remark 1):
+        - Beliefs enter only through B_en weights (not part of the state space).
+        - Reduced complexity O(|X|^2 |Q|^2 |U|) with polynomial in |X| versus 
+          the exponential complexity in |X| of prior work that includes belief states explicitly.
+    
+    - Design decision:
+        - Implemented convergence check as the paper assumes VI runs to convergence but does not specify a sweep count.
+            - This implementation runs at most 'T_steps' sweeps and stops early if the maximum 
+              change in V across all states falls below a set tolerance.
+        - Optional: stay-action guard for large T_r as algorithm can 'trap' the rover at a high-belief cell where V_stay > V_move.
+            - This belief-induced local maximum for small T_r is self-corrected at the next replanning cycle, but for larger
+              the freeze is enough to look like a hang.
+            - See CHANGELOG.md.
+"""
+import numpy as np
+# from numpy import random
 
 from environment import GRID, ACTIONS, clip, transition_probabilities
 from fsa import FSA_ACCEPT, FSA_DEAD, FSA_ALL, fsa_step, ALL_SUBSETS, compute_B_en

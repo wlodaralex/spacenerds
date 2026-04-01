@@ -1,6 +1,13 @@
-"""grid constants, labels, and stochastic motion helpers."""
+"""
+environment.py - Grid utilities and MDP motion model.
 
-__all__ = ['GRID', 'AP_LIST', 'TRUE_L']
+Setup:
+    - 10x10 grid from Fig. 2.
+    - Set of atmoic propositions (Section 3.1):
+        * Obstacles are not hard-coded walls for collision checking, instead avoidance is handled by the FSA and belief-weighted value iteration.
+    - Stochastic transition model for both agents (Section 3.2.1 & 6.1.1):
+        * Motion with 'p_intended' probability of reaching the desired cell and '1 - p_intended' slip probability split among cardinal neighbours of the target cell.
+"""
 
 GRID = 10
 AP_LIST = ['A', 'B', 'C', 'D', 'O']

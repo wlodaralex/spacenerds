@@ -327,7 +327,7 @@ def run_simulation(
         elif rover_q == FSA_DEAD:
             print(f"   MISSION FAILED (obstacle) at k={k}, pos={rover_pos}")
             break
-        elif k % 200 == 0:
+        elif k % 1 == 0 and verbose:
             V_here = V.get((rover_pos[0], rover_pos[1], rover_q), 0.0)
             print(f"  k={k:4d}  rover={rover_pos}  q={rover_q}  "
                   f"V={V_here:.3f}  copter={copter_pos}  "

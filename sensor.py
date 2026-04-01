@@ -3,6 +3,9 @@
 import numpy as np
 from environment import *
 
+
+
+# Sensor Model #
 def sensor_beta(agent_pos: tuple, cell_pos: tuple, R: float, M: float) -> float:
     """return the probability of a correct binary observation."""
     # formula: quartic sensor dome
@@ -14,9 +17,16 @@ def sensor_beta(agent_pos: tuple, cell_pos: tuple, R: float, M: float) -> float:
 
 
 def bayes_update(belief: float, z: int, beta: float) -> float:
-    """update one bernoulli belief with one noisy binary observation."""
-    # formula: bernoulli bayes flip
-    # posterior = likelihood * prior / evidence for one binary sensor reading
+    """
+    Update B(x |= ap) given observation z ∈ {0, 1} and sensor accuracy β.
+
+    Derivation from Bayes' theorem with Bernoulli likelihood (Eq. 8):
+        - If z=1: posterior ∝ β * prior        (correct positive)
+        - If z=0: posterior ∝ (1-β) * prior    (correct negative)
+    
+    As per 'algorithm 1', we initialize B ∈ (0,1). To ensure numerical stability the denominator is floored at 1e-12
+    to prevent division by zero in case the belief ever reaches 0 or 1 due to prior initialization.
+    """
     if z == 1:
         num = beta * belief
         den = beta * belief + (1 - beta) * (1 - belief)
@@ -41,4 +51,5 @@ def init_beliefs() -> dict:
         for c in range(GRID):
             # step 1 seed the shared prior used by both agents at epoch 0
             B[(r, c)] = {'A': 0.1, 'B': 0.1, 'C': 0.1, 'D': 0.1, 'O': 0.3}
+            # B[(r, c)] = {'A': 0.5, 'B': 0.5, 'C': 0.5, 'D': 0.5, 'O': 0.5}
     return B

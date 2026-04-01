@@ -255,29 +255,78 @@ def make_convergence_plot(history: dict, filepath: str,
     ax_obs.set_ylim(-0.05, 1.05)
     ax_obs.set_xlabel('Time step k', fontsize=10)
     ax_obs.set_ylabel('B(x |= O)', fontsize=10)
-    ax_obs.set_title('Obstacle cells  (truth: O = True)', fontsize=10)
-    ax_obs.legend(fontsize=8)
-    ax_obs.grid(True, alpha=0.3)
+    ax_obs.set_title(
+        f'Obstacle Cells — B(x|=O) → 1\n'
+        f'{len(obs_sensed)}/{len(gt_obstacle)} within sensor range',
+        fontsize=10, fontweight='bold')
+    ax_obs.legend(fontsize=8, loc='lower right')
 
-    for i, cell in enumerate(free_cells):
-        vals = [belief_history[t][cell]['O'] for t in range(n)]
-        ax_free.plot(ks, vals, color=colors_free[i % 3], lw=1.8,
-                     label=f'cell {cell}')
-    ax_free.axhline(0.0, color='black', lw=0.8, ls='--', alpha=0.5,
-                    label='target = 0')
-    ax_free.set_ylim(-0.05, 1.05)
-    ax_free.set_xlabel('Time step k', fontsize=10)
+    # Free-cell panel
+    draw_panel(ax_free, free_sensed, free_unsensed, 'O', '#1f77b4', 0.0)
+    ax_free.set_xlabel('Timestep k', fontsize=10)
     ax_free.set_ylabel('B(x |= O)', fontsize=10)
-    ax_free.set_title('Free cells  (truth: O = False)', fontsize=10)
-    ax_free.legend(fontsize=8)
-    ax_free.grid(True, alpha=0.3)
+    ax_free.set_title(
+        f'Free Cells — B(x|=O) → 0\n'
+        f'{len(free_sensed)}/{len(gt_free)} within sensor range',
+        fontsize=10, fontweight='bold')
+    ax_free.legend(fontsize=8, loc='upper right')
+
+    # Target panel
+    ap_colors = {'A': '#1f77b4', 'B': '#2ca02c', 'C': '#9467bd', 'D': '#ff7f0e'}
+    for ap in show_aps:
+        draw_panel(ax_tgt,
+                   tgt_sensed[ap], tgt_unsensed[ap],
+                   ap, ap_colors[ap], 1.0, label_ap=ap)
+    ax_tgt.set_xlabel('Timestep k', fontsize=10)
+    ax_tgt.set_ylabel('B(x |= AP)', fontsize=10)
+    ax_tgt.set_title(
+        f'Target Cells — B(x|=AP) → 1\n'
+        f'Branch: {which if history["complete"] else "incomplete"}  '
+        f'(APs: {", ".join(show_aps)})',
+        fontsize=10, fontweight='bold')
+    ax_tgt.legend(fontsize=8, loc='lower right')
+
+    # Shared legend panel
+    legend_text = (
+        "Visual elements\n"
+        "───────────────────────────────\n"
+        "Solid line      Median belief across\n"
+        "                sensed cell population\n\n"
+        "Dotted line     Mean belief\n"
+        "                (gap vs median = path bias:\n"
+        "                 some cells found early)\n\n"
+        "Dark band       IQR — middle 50% of cells\n"
+        "                (narrows as beliefs converge)\n\n"
+        "Light band      Full range  (min to max)\n\n"
+        "Dashed line     Unsensed cells median\n"
+        "                (never in sensor range;\n"
+        "                 stayed at prior)\n\n"
+        "Black dashed    Theorem 1 asymptotic target\n"
+        "                (B → 1 for obs/targets,\n"
+        "                 B → 0 for free cells)\n\n"
+        "Sensed defined as: sensor_beta > 0.5\n"
+        "  Rover  R=2, AP={A,B,C,D,O}\n"
+        "  Copter R=4, AP={O}"
+    )
+    ax_leg.text(0.05, 0.97, legend_text,
+                transform=ax_leg.transAxes,
+                fontsize=8.5, verticalalignment='top',
+                fontfamily='monospace',
+                bbox=dict(boxstyle='round,pad=0.6', facecolor='#f8f8f8',
+                          edgecolor='#cccccc', linewidth=1.2))
+
+    # Super-title
+    status = ("Complete" if history['complete'] else
+              ("Failed"  if history['fail']     else "Timeout"))
+    fig.suptitle(
+        f'Belief Convergence — Theorem 1 Validation   '
+        f'[{status}  via {which}  k={history["k_final"]}]',
+        fontsize=12, fontweight='bold')
 
     plt.tight_layout()
     fig.savefig(filepath, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f"  Saved: {filepath}")
-
-
 
 
 def _subsample_for_cycles(history: dict, belief_history: list) -> tuple:
@@ -383,7 +432,6 @@ def make_unified_animation(history: dict, filepath: str,
     if belief_history is None:
         print("  no belief history available in history object")
         return
-
     if use_substeps and 'rover_substeps' in history:
         rover_path  = history['rover_substeps']
         copter_path = history['copter_substeps']
@@ -392,13 +440,34 @@ def make_unified_animation(history: dict, filepath: str,
     else:
         rover_path, copter_path, bh, k_list = _subsample_for_cycles(
             history, belief_history)
-
     phase_list = history.get('phase_list', None)
     n_frames   = min(len(bh), len(rover_path), len(copter_path), len(k_list))
 
-    fig, ax = plt.subplots(figsize=(7, 7))
-    plt.subplots_adjust(top=0.88)
+    v_history    = history.get('v_history', None)  # list of V dicts, one per VI call
+    fsa_states   = history.get('fsa_states', [0])  # rover FSA state per cycle
 
+    # Build per-frame V lookup: map each substep frame to the most recent V
+    # v_history has one entry per rover_value_iteration call 
+    # k_list has one entry per substep, can map by finding which VI call was current
+    def get_V_for_frame(frame_idx):
+        if v_history is None or len(v_history) == 0:
+            return None
+        # Each cycle is T_c + T_r = 8 substeps (approximately)
+        # Use k_list to find the cycle more robustly
+        k_val = k_list[min(frame_idx, len(k_list) - 1)]
+        # VI happens every T_c + T_r steps — cycle index approximation
+        cycle = min(k_val // 8, len(v_history) - 1)
+        return v_history[cycle]
+
+    def get_q_for_frame(frame_idx):
+        if not fsa_states:
+            return 0
+        k_val  = k_list[min(frame_idx, len(k_list) - 1)]
+        cycle  = min(k_val // 8, len(fsa_states) - 1)
+        return fsa_states[cycle]
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    plt.subplots_adjust(top=0.88)
     for i in range(GRID + 1):
         ax.axhline(i - 0.5, color='#aaa', lw=0.4, zorder=1)
         ax.axvline(i - 0.5, color='#aaa', lw=0.4, zorder=1)
@@ -421,7 +490,7 @@ def make_unified_animation(history: dict, filepath: str,
     copter_trail, = ax.plot([], [], '-', color='tomato', lw=1.2,
                             alpha=0.5, zorder=5)
 
-
+    # AP label texts — fade in as belief rises
     revealed_texts = {
         (r, c, ap): ax.text(
             c, r, ap, ha='center', va='center', fontsize=9,
@@ -430,6 +499,15 @@ def make_unified_animation(history: dict, filepath: str,
         for r in range(GRID)
         for c in range(GRID)
         for ap in AP_LIST
+    }
+
+    # V value texts — small number in top-left corner of each cell
+    v_texts = {
+        (r, c): ax.text(
+            c - 0.38, r - 0.35, '', ha='left', va='top',
+            fontsize=5.5, color='#1a6b1a', alpha=0.85, zorder=8)
+        for r in range(GRID)
+        for c in range(GRID)
     }
 
     name = history.get('scenario_name', '')
@@ -443,19 +521,30 @@ def make_unified_animation(history: dict, filepath: str,
 
     def update(i):
         beliefs_i = bh[i]
-
-        obs_grid = np.array([[beliefs_i[(r, c)]['O'] for c in range(GRID)]
-                             for r in range(GRID)])
+        obs_grid  = np.array([[beliefs_i[(r, c)]['O'] for c in range(GRID)]
+                              for r in range(GRID)])
         im_obs.set_data(obs_grid)
 
+        # AP belief labels
         for r in range(GRID):
             for c in range(GRID):
                 for ap in AP_LIST:
-                    b = beliefs_i[(r, c)][ap]
-
+                    b     = beliefs_i[(r, c)][ap]
                     alpha = max(0.0, min(1.0, (b - 0.55) * 6))
                     revealed_texts[(r, c, ap)].set_alpha(alpha)
 
+        # V value labels
+        V_now = get_V_for_frame(i)
+        q_now = get_q_for_frame(i)
+        for r in range(GRID):
+            for c in range(GRID):
+                if V_now is not None:
+                    v_val = V_now.get((r, c, q_now), 0.0)
+                    v_texts[(r, c)].set_text(f'{v_val:.2f}')
+                else:
+                    v_texts[(r, c)].set_text('')
+
+        # Agent positions and trails
         ri = min(i, len(rover_path)  - 1)
         ci = min(i, len(copter_path) - 1)
         if ri > 0:
@@ -473,7 +562,8 @@ def make_unified_animation(history: dict, filepath: str,
                  'W': 'warmup', 'I': 'init', 'E': 'end'}.get(phase, phase)
         title.set_text(f'k = {k_val}   [{pstr}]')
         return ([im_obs, rover_dot, copter_dot, rover_trail, copter_trail, title]
-                + list(revealed_texts.values()))
+                + list(revealed_texts.values())
+                + list(v_texts.values()))
 
     anim = FuncAnimation(fig, update, frames=n_frames, interval=200, blit=False)
     _save_animation(anim, filepath, fps)
