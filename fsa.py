@@ -1,46 +1,45 @@
-"""finite-state mission logic and belief-weighted automaton transitions."""
+"""
+fsa.py
 
-from environment import AP_LIST
+- define mission progress states and terminal states
+- convert cell beliefs into belief-weighted automaton transitions
 
+function
+- `fsa_step`: advance one realized automaton state
+- `compute_B_en`: compute one belief-weighted transition distribution
+"""
+
+# --- Automaton Constants ---
 FSA_ACCEPT = {3, 4, 5}
 FSA_DEAD = -1
 FSA_ALL = [FSA_DEAD, 0, 1, 2, 3, 4, 5]
 
 
+# --- Automaton Dynamics ---
 def fsa_step(q: int, labels: frozenset) -> int:
     """advance one automaton state using one realized label set."""
-    # formula: obstacle veto
-    # o has highest priority and sends every active state to dead
+
     if q == FSA_DEAD or q in FSA_ACCEPT:
         return q
     if 'O' in labels:
         return FSA_DEAD
     if q == 0:
-        # formula: branch ladder
-        # a wins immediately, then b starts phi_2, then c starts phi_3
         if 'A' in labels: return 3  # φ1 complete
         if 'B' in labels: return 1  # start φ2 branch
         if 'C' in labels: return 2  # start φ3 branch
         return 0
     if q == 1:                      # found B and looking for C
-        # formula: shortcut ladder
-        # c finishes phi_2; a is still an immediate shortcut to acceptance
         if 'C' in labels: return 4  # φ2 complete
         if 'A' in labels: return 3  # φ1 complete (shortcut)
         return 1
     if q == 2:                      # found C and looking for D
-        # formula: delayed-finish ladder
         if 'D' in labels: return 5  # φ3 complete
         if 'A' in labels: return 3  # φ1 complete (shortcut)
         return 2
     return q
 
-ALL_SUBSETS = [
-    frozenset(AP_LIST[i] for i in range(len(AP_LIST)) if mask & (1 << i))
-    for mask in range(2 ** len(AP_LIST))
-]
 
-
+# --- Belief-Weighted Transitions ---
 def compute_B_en(cell_beliefs, q):
     """return the distribution over automaton successors at one cell.
 
@@ -50,19 +49,21 @@ def compute_B_en(cell_beliefs, q):
             sum_sigma 1[delta(q, sigma) = q']
             prod_ap B_ap(x')^{1[ap in sigma]} (1-B_ap(x'))^{1[ap not in sigma]}
 
-    the old implementation evaluated that sum by enumerating all 2^|AP| label
-    subsets. the current implementation is algebraically equivalent but uses the
-    fsa priority rules to collapse the subset sum into closed-form bernoulli
-    products. for example, at q=0 the only relevant events are:
+    - old implementation evaluated that sum by enumerating all 2^|AP| label subsets. 
+    - current implementation is algebraically equivalent 
+        but uses the fsa priority rules to collapse 
+        the subset sum into closed-form bernoulli products. 
+    
+    for example, at q=0 the only relevant events are:
 
-        q'=-1: O
-        q'=3 : (not O) and A
-        q'=1 : (not O) and (not A) and B
-        q'=2 : (not O) and (not A) and (not B) and C
-        q'=0 : (not O) and (not A) and (not B) and (not C)
+        q'= -1: O
+        q'= 3 : (not O) and A
+        q'= 1 : (not O) and (not A) and B
+        q'= 2 : (not O) and (not A) and (not B) and C
+        q'= 0 : (not O) and (not A) and (not B) and (not C)
 
-    so the returned probabilities are exact, but the exponential subset loop is
-    removed.
+    so the returned probabilities are exact, 
+    but the exponential subset loop is removed.
     """
     if q == FSA_DEAD or q in FSA_ACCEPT:
         return {q: 1.0}

@@ -1,42 +1,77 @@
 [
   {
-    "name": "_rover_private_only",
+    "name": "game_copter_altruistic",
     "rover_start": [0, 0],
     "copter_start": [0, 0],
-    "T_c": 5, "T_r": 3, "alpha": 1.5,
-    "gamma": 2.0, "lambda": 0.0,
-    "vi_steps": 80, "max_k": 600,
     "copter_mode": "utility",
-    "seed": 12
+    "alpha": 1.5,
+    "gamma": 2.0,
+    "lambda_": 0.0,
+    "rho": 1.0,
+    "tau_r": 0.9,
+    "D_c": 55.0,
+    "vi_steps": 80,
+    "max_k": 600,
+    "seed": 1024
   },
   {
-    "name": "_copter_private_only",
+    "name": "game_rover_altruistic",
     "rover_start": [0, 0],
     "copter_start": [0, 0],
-    "T_c": 5, "T_r": 3, "alpha": 1.5,
-    "gamma": 0.01, "lambda": 1.0,
-    "vi_steps": 80, "max_k": 600,
     "copter_mode": "utility",
-    "seed": 12
+    "alpha": 1.5,
+    "gamma": 0.0,
+    "lambda_": 1.0,
+    "rho": 1.0,
+    "tau_r": 0.9,
+    "D_c": 55.0,
+    "vi_steps": 80,
+    "max_k": 600,
+    "seed": 1024
   },
   {
-    "name": "_both_private",
+    "name": "game_both_private",
     "rover_start": [0, 0],
     "copter_start": [0, 0],
-    "T_c": 5, "T_r": 3, "alpha": 1.5,
-    "gamma": 2.0, "lambda": 1.0,
-    "vi_steps": 80, "max_k": 600,
     "copter_mode": "utility",
-    "seed": 12
+    "alpha": 1.5,
+    "gamma": 2.0,
+    "lambda_": 1.0,
+    "rho": 1.0,
+    "tau_r": 0.9,
+    "D_c": 55.0,
+    "vi_steps": 80,
+    "max_k": 600,
+    "seed": 1024
   },
-    {
-    "name": "_hashimoto_baseline",
+  {
+    "name": "game_both_altruistic",
     "rover_start": [0, 0],
     "copter_start": [0, 0],
-    "T_c": 5, "T_r": 3, "alpha": 1.5,
-    "gamma": 0.0, "lambda": 0.0,
-    "vi_steps": 80, "max_k": 600,
+    "copter_mode": "utility",
+    "alpha": 1.5,
+    "gamma": 0.0,
+    "lambda_": 0.0,
+    "rho": 1.0,
+    "tau_r": 0.9,
+    "D_c": 55.0,
+    "vi_steps": 80,
+    "max_k": 600,
+    "seed": 1024
+  },
+  {
+    "name": "baseline_global",
+    "rover_start": [0, 0],
+    "copter_start": [0, 0],
     "copter_mode": "global",
-    "seed": 12
+    "alpha": 1.5,
+    "gamma": 0.0,
+    "lambda_": 0.0,
+    "rho": 1.0,
+    "tau_r": 0.9,
+    "D_c": null,
+    "vi_steps": 80,
+    "max_k": 600,
+    "seed": 1024
   }
 ]

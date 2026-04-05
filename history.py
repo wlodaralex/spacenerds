@@ -1,4 +1,16 @@
-"""structured simulation history for plots, csv export, and analysis."""
+"""
+history.py
+
+- store epoch records, timestep traces, and sparse belief snapshots
+- export results as tables, legacy dicts, and summary strings
+
+class
+- `EpochRecord`: one epoch summary
+- `SimHistory`: run-level history and export container
+
+function
+- none
+"""
 
 import copy
 import math
@@ -7,6 +19,7 @@ from pathlib import Path
 from typing import Optional
 
 
+# --- Epoch Records ---
 @dataclass
 class EpochRecord:
     """one planning epoch."""
@@ -32,15 +45,17 @@ class EpochRecord:
     C_r:            float        # rover risk cost
     C_c:            float        # copter flight cost
     I:              float        # information gain
+    u_r:            float        # rover utility
     u_c:            float        # copter utility
-    E_c:            float        # remaining copter energy
+    D_c:            float        # remaining copter distance budget
 
     # planning
     n_expanded:     int = 0      # D* Lite nodes expanded this epoch
 
 
+# --- Simulation History ---
 class SimHistory:
-    """run history with epoch summaries and timestep traces."""
+    """Run history with epoch summaries and timestep traces."""
 
     def __init__(self, rover_start=(0,0), copter_start=(0,0), **params):
         self.params = {
@@ -123,6 +138,9 @@ class SimHistory:
         import pandas as pd
         gamma = self.params.get('gamma')
         lambda_ = self.params.get('lambda_')
+        copter_mode = self.params.get('copter_mode')
+        rho = self.params.get('rho')
+        D_c_budget = self.params.get('D_c_budget')
         rover_path_length = self.rover_path_length()
         copter_path_length = self.copter_path_length()
         solve_time_s = self.meta.get('solve_time_s')
@@ -134,11 +152,15 @@ class SimHistory:
                 'rover_r': e.rover_pos[0], 'rover_c': e.rover_pos[1],
                 'copter_r': e.copter_pos[0], 'copter_c': e.copter_pos[1],
                 'q': e.rover_q,
+                'copter_mode': copter_mode,
                 'gamma': gamma,
                 'lambda': lambda_,
+                'rho': rho,
+                'D_c_budget': D_c_budget,
                 'Phi': e.Phi, 'G': e.G,
-                'C_r': e.C_r, 'C_c': e.C_c, 'I': e.I, 'u_c': e.u_c,
-                'E_c': e.E_c,
+                'C_r': e.C_r, 'C_c': e.C_c, 'I': e.I,
+                'u_r': e.u_r, 'u_c': e.u_c,
+                'D_c': e.D_c,
                 'action_changed': e.action_changed,
                 'n_expanded': e.n_expanded,
                 'copter_flight_steps': len(e.c_substeps),
@@ -172,17 +194,23 @@ class SimHistory:
             'C_r': [e.C_r for e in self.epochs],
             'C_c': [e.C_c for e in self.epochs],
             'I_vals': [e.I for e in self.epochs],
+            'u_r_vals': [e.u_r for e in self.epochs],
             'u_c_vals': [e.u_c for e in self.epochs],
             'action_changed': [e.action_changed for e in self.epochs],
-            'E_c': [e.E_c for e in self.epochs],
+            'D_c': [e.D_c for e in self.epochs],
             'final_rover': self.params.get('final_rover'),
             'final_copter': self.params.get('final_copter'),
             'final_q': self.params.get('final_q'),
             'scenario_name': self.meta.get('scenario_name',
                                            self.params.get('scenario_name', '')),
+            'copter_mode': self.params.get('copter_mode'),
             'gamma': self.params.get('gamma'),
+            # Keep both spellings while visualization and legacy CSV consumers
+            # migrate to the explicit ``lambda_`` field name.
             'lambda': self.params.get('lambda_'),
             'lambda_': self.params.get('lambda_'),
+            'rho': self.params.get('rho'),
+            'D_c_budget': self.params.get('D_c_budget'),
             'rover_path_length': self.rover_path_length(),
             'copter_path_length': self.copter_path_length(),
             'solve_time_s': self.meta.get('solve_time_s'),
@@ -210,52 +238,11 @@ class SimHistory:
         """return a one-line run summary."""
         status = ('DONE' if self.complete else
                   'FAIL' if self.fail else 'TIMEOUT')
-        n = len(self.epochs)
+        if not self.epochs:
+            return f"{status:7s} k={self.k_final:4d}  epochs=0"
+
+        n_epochs = len(self.epochs)
         return (f"{status:7s} k={self.k_final:4d}  "
-                f"epochs={n:3d}  "
+                f"epochs={n_epochs:3d}  "
                 f"phi={self.which_phi or '-':15s}  "
-                f"Φ_final={self.epochs[-1].Phi:.3f}" if self.epochs else
-                f"{status:7s} k={self.k_final:4d}  epochs=0")
-
-    def __getitem__(self, key):
-        if key == 'epochs':
-            return self.epochs
-        if key == 'substeps':
-            return self.substeps
-        if key == 'belief_snapshots':
-            return self.belief_snapshots
-        if key == 'snap_meta':
-            return self.snap_meta
-        if key == 'complete':
-            return self.complete
-        if key == 'fail':
-            return self.fail
-        if key == 'which_phi':
-            return self.which_phi
-        if key == 'k_final':
-            return self.k_final
-        if key == 'belief_history':
-            return self.belief_history
-        if key in self.meta:
-            return self.meta[key]
-        if key in self.params:
-            return self.params[key]
-        legacy = self.to_legacy_dict()
-        if key in legacy:
-            return legacy[key]
-        raise KeyError(key)
-
-    def __setitem__(self, key, value):
-        if key in {'complete', 'fail', 'which_phi', 'k_final', 'belief_history'}:
-            setattr(self, key, value)
-            return
-        if key in self.params:
-            self.params[key] = value
-            return
-        self.meta[key] = value
-
-    def get(self, key, default=None):
-        try:
-            return self[key]
-        except KeyError:
-            return default
+                f"Φ_final={self.epochs[-1].Phi:.3f}")

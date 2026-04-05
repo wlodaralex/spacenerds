@@ -1,498 +1,417 @@
-"""rover execution, sensing, and copter exploration policies."""
+"""
+agents.py
+
+- execute rover and copter motion after planning chooses a policy or action sequence
+- update the shared belief map from realized sensing
+
+class
+- `CopterPlayer`: shared copter path helper base
+- `BaselineRoverPlayer`: baseline rover runtime wrapper
+- `BaselineCopterPlayer`: baseline copter runtime wrapper
+- `GameRoverPlayer`: game rover runtime wrapper
+- `GameCopterPlayer`: game copter runtime wrapper
+
+function
+- `rover_sense`: update local rover beliefs
+- `copter_sense`: update local copter obstacle beliefs
+"""
 
 import copy
 import math
-import random
 
-import numpy as np
-
-from environment import GRID, AP_LIST, ACTIONS, CARDINALS, clip, TRUE_L, transition_probabilities
+from scenario import SimulationScenario
+from environment import (
+    GRID,
+    AP_LIST,
+    ACTIONS,
+    TRUE_L,
+    clip,
+    transition_probabilities,
+)
 from sensor import sensor_beta, bayes_update, observe
-from fsa import FSA_ACCEPT, FSA_DEAD, fsa_step, compute_B_en
+from fsa import FSA_ACCEPT, FSA_DEAD, FSA_ALL, compute_B_en, fsa_step
+from planning import (DStarLitePlanner,
+                      grid_to_graph,
+                      rover_value_iteration,
+                      plan_copter_action_game,
+                      plan_copter_action_global,
+                      plan_copter_action_local)
 
-
-_P_COPTER = None
-_UTILITY_ROLLOUT_CACHE = {}
-
-def rover_sense(beliefs: dict, pos: tuple) -> None:
-    """update all local beliefs visible to the rover."""
-    R, M = 2, 0.5
-    for r in range(max(0, pos[0]-R), min(GRID, pos[0]+R+1)):
-        for c in range(max(0, pos[1]-R), min(GRID, pos[1]+R+1)):
-            # formula: quartic sensor dome
+# --- Sensing (Common) ---
+def _sense_grid(beliefs: dict, pos: tuple, R: int, M: float, ap_list) -> None:
+    """Fuse noisy observations into beliefs for the given APs within range R."""
+    for r in range(max(0, pos[0] - R), min(GRID, pos[0] + R + 1)):
+        for c in range(max(0, pos[1] - R), min(GRID, pos[1] + R + 1)):
             beta = sensor_beta(pos, (r, c), R, M)
             if beta <= 0.5:
                 continue
-            for ap in AP_LIST:
-                # formula: bernoulli bayes flip
+            for ap in ap_list:
                 z = observe(TRUE_L[(r, c)], ap, beta)
                 beliefs[(r, c)][ap] = bayes_update(beliefs[(r, c)][ap], z, beta)
 
+
+def rover_sense(beliefs: dict, pos: tuple) -> None:
+    """update all local beliefs visible to the rover."""
+    _sense_grid(beliefs, pos, R=2, M=0.5, ap_list=AP_LIST)
+
+
 def copter_sense(beliefs: dict, pos: tuple) -> None:
     """update local obstacle beliefs visible to the copter."""
-    R, M = 4, 0.4
-    for r in range(max(0, pos[0]-R), min(GRID, pos[0]+R+1)):
-        for c in range(max(0, pos[1]-R), min(GRID, pos[1]+R+1)):
-            # formula: quartic sensor dome
-            beta = sensor_beta(pos, (r, c), R, M)
-            if beta <= 0.5:
-                continue
-            # step 1 the copter only updates o, not a/b/c/d
-            z = observe(TRUE_L[(r, c)], 'O', beta)
-            beliefs[(r, c)]['O'] = bayes_update(beliefs[(r, c)]['O'], z, beta)
+    _sense_grid(beliefs, pos, R=4, M=0.4, ap_list=['O'])
 
-def H(b: float) -> float:
-    """binary shannon entropy."""
-    # formula: binary fog score
-    b = np.clip(b, 1e-9, 1 - 1e-9)
-    return -b * np.log2(b) - (1 - b) * np.log2(1 - b)
 
-def copter_explore(beliefs: dict, copter_pos: tuple, b_max: dict, T_c: int,
-                   alpha: float = 1.5, record_beliefs: bool = False) -> tuple:
-    """legacy single-target global helper kept for reference."""
-    pos = list(copter_pos)
-    substeps = []
-    belief_snapshots = []
+# --- Player Wrappers ---
+class CopterPlayer:
+    """Shared copter path helpers used by both runtime wrappers."""
 
-    for _ in range(T_c):
-        W = {(r, c): H(beliefs[(r, c)]['O']) + alpha * b_max.get((r, c), 0.0)
-             for r in range(GRID) for c in range(GRID)}
-
-        candidates = {k: v for k, v in W.items()
-                      if k != tuple(pos) and H(beliefs[k]['O']) > 0.05}
-        if not candidates:
-            candidates = {k: v for k, v in W.items() if k != tuple(pos)}
-        if not candidates:
-            candidates = W  
-
-        x_star = max(candidates, key=candidates.get)
-
-        if tuple(pos) != x_star:
-            best_u, best_d = 1, float('inf')
-            for a, (dr, dc) in enumerate(ACTIONS):
-                nr, nc = clip(pos[0] + dr, pos[1] + dc)
-                d = abs(nr - x_star[0]) + abs(nc - x_star[1])
-                if d < best_d:
-                    best_d, best_u = d, a
-            dr, dc = ACTIONS[best_u]
-            nr, nc = clip(pos[0] + dr, pos[1] + dc)
-            if np.random.rand() < 0.90:
-                pos = [nr, nc]
-            else:
-                slips = [list(clip(nr + ddr, nc + ddc))
-                         for ddr, ddc in CARDINALS
-                         if clip(nr + ddr, nc + ddc) != (nr, nc)]
-                pos = random.choice(slips) if slips else [nr, nc]
-
-        copter_sense(beliefs, tuple(pos))
-        substeps.append(tuple(pos))
-        if record_beliefs:
-            belief_snapshots.append(copy.deepcopy(beliefs))
-
-    return tuple(pos), substeps, belief_snapshots
-
-def _compute_W(beliefs: dict, b_max: dict, alpha: float) -> np.ndarray:
-    """return the Hashimoto acquisition score over the whole grid."""
-    # formula: hashimoto scout field
-    # w(x) = h(b_o(x)) + alpha * b_max(x)
-    b_O = np.array([[beliefs[(r, c)]['O'] for c in range(GRID)]
-                     for r in range(GRID)])
-    b_O = np.clip(b_O, 1e-9, 1.0 - 1e-9)
-    H_arr = -b_O * np.log2(b_O) - (1.0 - b_O) * np.log2(1.0 - b_O)
-
-    bmax_arr = np.array([[b_max.get((r, c), 0.0) for c in range(GRID)]
-                          for r in range(GRID)])
-
-    return H_arr + alpha * bmax_arr
-
-def _copter_kernel() -> np.ndarray:
-    """build and cache the stochastic copter kernel for local/global modes."""
-    global _P_COPTER
-    if _P_COPTER is not None:
-        return _P_COPTER
-    N = GRID * GRID
-    P = np.zeros((len(ACTIONS), N, N))
-    for r in range(GRID):
-        for c in range(GRID):
-            i = r * GRID + c
-            for a in range(len(ACTIONS)):
-                # formula: stochastic slip kernel
-                for (r2, c2), p in transition_probabilities(r, c, a, 0.90).items():
-                    P[a, i, r2 * GRID + c2] = p
-    _P_COPTER = P
-    return _P_COPTER
-
-def copter_explore_local(beliefs: dict, copter_pos: tuple, b_max: dict,
-                         T_c: int, alpha: float = 1.5,
-                         record_beliefs: bool = False) -> tuple:
-    """one-step greedy copter policy with stochastic motion."""
-    P   = _copter_kernel()                                            
-    N   = GRID * GRID
-    pos = list(copter_pos)
-    substeps         = []
-    belief_snapshots = []
-
-    for _ in range(T_c):  
-        # step 1 score all cells with W(x)
-        W_flat = _compute_W(beliefs, b_max, alpha).ravel()            
-
-        # step 2 choose the best expected next action
-        # formula: one-step lookahead
-        # q(a) = sum_x' p(x' | x, a) w(x')
-        idx = pos[0] * GRID + pos[1]
-        Q   = P[:, idx, :] @ W_flat                                  
-        best_u = int(np.argmax(Q))                                    
-
-        # step 3 sample the next state under the copter kernel
-        x_next   = np.random.choice(N, p=P[best_u, idx, :])
-        pos = [x_next // GRID, x_next % GRID]
-
-        # step 4 sense from the realized position
-        copter_sense(beliefs, tuple(pos))                             
-        substeps.append(tuple(pos))
-        if record_beliefs:
-            belief_snapshots.append(copy.deepcopy(beliefs))
-
-    return tuple(pos), substeps, belief_snapshots
-
-def copter_explore_global(beliefs: dict, copter_pos: tuple, b_max: dict,
-                          T_c: int, alpha: float = 1.5,
-                          record_beliefs: bool = False) -> tuple:
-    """global target-selection copter policy with stochastic motion."""
-    P   = _copter_kernel()                                            
-    N   = GRID * GRID
-    pos = list(copter_pos)
-    substeps         = []
-    belief_snapshots = []
-    l = 0                                                           
-
-    while l < T_c - 1:                                              
-        # step 1 choose the current best target cell
-        # formula: greedy beacon pick
-        W = _compute_W(beliefs, b_max, alpha)                        
-        x_star = divmod(int(np.argmax(W)), GRID)                      
-
-        # step 1b solve the finite-horizon reaching value iteration
-        # formula: reach-the-beacon bellman
-        target_idx = x_star[0] * GRID + x_star[1]
-        V = np.zeros(N)
-        V[target_idx] = 1.0
-        with np.errstate(divide='ignore', over='ignore', invalid='ignore'):
-            for _ in range(50):
-                QV    = P @ V
-                V_new = np.clip(np.max(QV, axis=0), 0.0, 1.0)
-                V_new[target_idx] = 1.0
-                if np.max(np.abs(V_new - V)) < 1e-4:
-                    break
-                V = V_new
-            reach_policy = np.argmax(P @ V, axis=0)
-        reach_policy[target_idx] = 0
-
-        # step 1a if already at the target, sense and reselect
-        if tuple(pos) == x_star:
-            copter_sense(beliefs, tuple(pos))
-            substeps.append(tuple(pos))
-            if record_beliefs:
-                belief_snapshots.append(copy.deepcopy(beliefs))
-            l += 1
-            continue
-
-        # step 2 follow the reaching policy toward that target
-        while tuple(pos) != x_star and l < T_c - 1:                
-
-            idx = pos[0] * GRID + pos[1]
-            a   = int(reach_policy[idx])
-            # formula: stochastic slip kernel
-            j   = np.random.choice(N, p=P[a, idx, :])                
-
-            pos = [j // GRID, j % GRID]
-            l += 1
-
-            # step 3 sense from the realized position
-            copter_sense(beliefs, tuple(pos))                         
-            substeps.append(tuple(pos))
-            if record_beliefs:
-                belief_snapshots.append(copy.deepcopy(beliefs))
-
-    return tuple(pos), substeps, belief_snapshots
-
-def _copter_move(pos: list, action: int) -> list:
-    """Execute copter action: deterministic motion (formulation §2/§5)."""
-    # step 1 utility mode uses the clipped deterministic motion map
-    dr, dc = ACTIONS[action]
-    nr, nc = clip(pos[0] + dr, pos[1] + dc)
-    return [nr, nc]
-
-def _utility_rollout_cache(remaining: int):
-    """cache all action sequences and motion deltas for one horizon.
-
-    for a remaining horizon H, the exhaustive copter solver evaluates M = 8^H
-    discrete action sequences. this cache materializes that action space once:
-
-    - sequence_actions[m, t] is the t-th action in sequence m
-    - row_delta_by_sequence and col_delta_by_sequence store the per-step motion
-    - step_length_by_sequence stores the euclidean move length per step
-
-    the vectorized rollout then applies the same recurrence to every candidate
-    sequence in parallel:
-
-        r_{m,t+1} = clip(r_{m,t} + delta_r[m,t])
-        c_{m,t+1} = clip(c_{m,t} + delta_c[m,t])
-
-    so the later scoring step can batch all M candidates without changing the
-    underlying exhaustive search.
-    """
-    cached_rollout = _UTILITY_ROLLOUT_CACHE.get(remaining)
-    if cached_rollout is not None:
-        return cached_rollout
-
-    from itertools import product as iproduct
-
-    sequence_actions = np.array(
-        list(iproduct(range(1, len(ACTIONS)), repeat=remaining)),
-        dtype=np.int8,
-    )
-    action_row_delta = np.array(
-        [dr for dr, _ in ACTIONS],
-        dtype=np.int8,
-    )
-    action_col_delta = np.array(
-        [dc for _, dc in ACTIONS],
-        dtype=np.int8,
-    )
-    action_step_length = np.hypot(
-        action_row_delta.astype(np.float64),
-        action_col_delta.astype(np.float64),
-    )
-
-    cached_rollout = {
-        'sequence_actions': sequence_actions,
-        'row_delta_by_sequence': action_row_delta[sequence_actions],
-        'col_delta_by_sequence': action_col_delta[sequence_actions],
-        'step_length_by_sequence': action_step_length[sequence_actions],
-        'sequence_index': np.arange(len(sequence_actions)),
-    }
-    _UTILITY_ROLLOUT_CACHE[remaining] = cached_rollout
-    return cached_rollout
-
-def copter_explore_utility(beliefs: dict, copter_pos: tuple, b_max: dict,
-                           T_c: int, alpha: float = 1.5,
-                           record_beliefs: bool = False,
-                           lambda_: float = 0.0,
-                           rover_pos: tuple = (0, 0),
-                           energy: float = float('inf')) -> tuple:
-    """deterministic exhaustive copter search over the remaining horizon.
-
-    the optimized implementation is still the same exact maximization over the
-    discrete action space. for the remaining horizon H, it scores all
-    M = 8^H candidate sequences by
-
-        score_m = alpha I_m - lambda C_c,m
-
-    in parallel. if sequence m visits cells x_{m,1}, ..., x_{m,H}, then
-
-        C_c,m = sum_t 1[moved_{m,t}] * ||delta_{m,t}||_2
-                + rho * ||x_{m,H} - x_r||_2
-
-    and
-
-        I_m = sum_x 1[x is newly seen by sequence m] * H(B_O(x))
-
-    the boolean matrix seen_by_sequence[m, x] preserves the exact old semantics
-    that repeated visits within one sequence only count once. the solver still
-    returns the first action of the best feasible sequence, but the rollout and
-    scoring are vectorized across all candidates.
-    """
-    pos = list(copter_pos)
-    visited_global = {tuple(pos)}
-    substeps = []
-    belief_snapshots = []
-    RHO = 1.0
-
-    for step in range(T_c):
-        remaining = T_c - step
-
-        # step 1 cache the entropy reward of unseen cells
-        # formula: entropy scout bonus
-        # only cells not yet visited in this epoch can contribute new i(a_c)
-        obstacle_belief_flat = np.array(
-            [beliefs[(r, c)]['O'] for r in range(GRID) for c in range(GRID)],
-            dtype=np.float64,
-        )
-        unseen_cell_mask = np.ones(GRID * GRID, dtype=bool)
-        for r, c in visited_global:
-            unseen_cell_mask[r * GRID + c] = False
-        entropy_flat = np.zeros(GRID * GRID, dtype=np.float64)
-        unseen_obstacle_belief = np.clip(
-            obstacle_belief_flat[unseen_cell_mask],
-            1e-9,
-            1.0 - 1e-9,
-        )
-        entropy_flat[unseen_cell_mask] = (
-            -unseen_obstacle_belief * np.log2(unseen_obstacle_belief)
-            - (1.0 - unseen_obstacle_belief) * np.log2(1.0 - unseen_obstacle_belief)
-        )
-
-        # step 2 score staying for the rest of the epoch
-        # formula: stay-put baseline
-        d_return_now = abs(pos[0] - rover_pos[0]) + abs(pos[1] - rover_pos[1])
-        best_score = -lambda_ * RHO * d_return_now
-        best_action = 0
-
-        # step 3 score every remaining action sequence
-        # formula: batch rollout over m = 8^h candidates
-        rollout_cache = _utility_rollout_cache(remaining)
-        sequence_actions = rollout_cache['sequence_actions']
-        row_delta_by_sequence = rollout_cache['row_delta_by_sequence']
-        col_delta_by_sequence = rollout_cache['col_delta_by_sequence']
-        step_length_by_sequence = rollout_cache['step_length_by_sequence']
-        sequence_index = rollout_cache['sequence_index']
-
-        row_position = np.full(len(sequence_actions), pos[0], dtype=np.int16)
-        col_position = np.full(len(sequence_actions), pos[1], dtype=np.int16)
-        flight_cost = np.zeros(len(sequence_actions), dtype=np.float64)
-        information_gain = np.zeros(len(sequence_actions), dtype=np.float64)
-        seen_by_sequence = np.zeros(
-            (len(sequence_actions), GRID * GRID),
-            dtype=bool,
-        )
-
-        for horizon_index in range(remaining):
-            # step 3a apply the deterministic motion recurrence to every sequence
-            next_row_position = np.clip(
-                row_position + row_delta_by_sequence[:, horizon_index],
-                0,
-                GRID - 1,
-            )
-            next_col_position = np.clip(
-                col_position + col_delta_by_sequence[:, horizon_index],
-                0,
-                GRID - 1,
-            )
-            moved = (
-                (next_row_position != row_position)
-                | (next_col_position != col_position)
-            )
-
-            # formula: copter trip ledger
-            flight_cost += moved * step_length_by_sequence[:, horizon_index]
-
-            row_position = next_row_position
-            col_position = next_col_position
-            cell_index = row_position * GRID + col_position
-
-            # formula: set-once scout bonus
-            # repeated visits in one sequence count once, matching the old set
-            newly_seen = (
-                unseen_cell_mask[cell_index]
-                & ~seen_by_sequence[sequence_index, cell_index]
-            )
-            information_gain += newly_seen * entropy_flat[cell_index]
-            seen_by_sequence[sequence_index, cell_index] = True
-
-        # formula: frozen-return leash
-        return_cost = RHO * np.hypot(
-            row_position - rover_pos[0],
-            col_position - rover_pos[1],
-        )
-        total_cost = flight_cost + return_cost
-        feasible_sequence = total_cost <= energy
-        if np.any(feasible_sequence):
-            # formula: copter surrogate utility
-            # score = alpha * i - lambda * c_c
-            score_by_sequence = alpha * information_gain - lambda_ * total_cost
-            feasible_score = np.where(
-                feasible_sequence,
-                score_by_sequence,
-                -np.inf,
-            )
-            best_sequence_index = int(np.argmax(feasible_score))
-            candidate_score = float(feasible_score[best_sequence_index])
-            if candidate_score > best_score:
-                best_score = candidate_score
-                best_action = int(sequence_actions[best_sequence_index, 0])
-
-        # step 4 staying means the epoch is done
-        if best_action == 0:
-            for _ in range(remaining):
-                copter_sense(beliefs, tuple(pos))
-                substeps.append(tuple(pos))
-                if record_beliefs:
-                    belief_snapshots.append(copy.deepcopy(beliefs))
-            break
-
-        # step 5 execute the first move of the best sequence
-        pos = _copter_move(pos, best_action)
-        visited_global.add(tuple(pos))
-        copter_sense(beliefs, tuple(pos))
-        substeps.append(tuple(pos))
-        if record_beliefs:
-            belief_snapshots.append(copy.deepcopy(beliefs))
-
-    return tuple(pos), substeps, belief_snapshots
-
-def rover_execute(beliefs: dict, rover_pos: tuple, rover_q: int,
-                  policy: dict, T_r: int,
-                  record_beliefs: bool = False) -> tuple:
-    """execute the rover policy for at most t_r steps."""
-    pos              = list(rover_pos)
-    q                = rover_q
-    substeps         = [(tuple(pos), q)]
-    belief_snapshots = []
-
-    for _ in range(T_r):
-        if q in FSA_ACCEPT or q == FSA_DEAD:
-            break
-
-        # step 1 read the committed action from the current rover policy
-        a = policy.get((pos[0], pos[1], q), 1)
-        dr, dc = ACTIONS[a]
+    @staticmethod
+    def _move_copter(pos: list, action: int) -> list:
+        """Apply one deterministic copter action."""
+        dr, dc = ACTIONS[action]
         nr, nc = clip(pos[0] + dr, pos[1] + dc)
+        return [nr, nc]
 
-        # step 2 apply deterministic rover motion
-        pos = [nr, nc]
+    @staticmethod
+    def scout_distance(substeps, start_pos=None):
+        """Return total copter scout distance."""
+        if not substeps:
+            return 0.0
 
-        # step 3 update the realized automaton state with true labels
+        if start_pos is None:
+            if len(substeps) < 2:
+                return 0.0
+            full_path = substeps
+        else:
+            full_path = [start_pos] + list(substeps)
+
+        return sum(
+            math.hypot(full_path[i][0] - full_path[i + 1][0],
+                       full_path[i][1] - full_path[i + 1][1])
+            for i in range(len(full_path) - 1)
+        )
+
+    @staticmethod
+    def return_distance(substeps, rover_pos):
+        """Return frozen return distance to the rover reference pose."""
+        if not substeps:
+            return 0.0
+        return math.hypot(substeps[-1][0] - rover_pos[0],
+                          substeps[-1][1] - rover_pos[1])
+
+
+class BaselineRoverPlayer:
+    """Baseline rover runtime wrapper around the standalone VI planner."""
+
+    def __init__(self, scenario: SimulationScenario):
+        self.T_r = scenario.T_r
+        self.vi_steps = scenario.vi_steps or 80
+        self.V = {}
+        self.policy = {}
+        self.n_expanded = 0
+        self.b_max = {}
+
+    @staticmethod
+    def _compute_b_max(beliefs, rover_policy, rover_pos, rover_q, T_r):
+        """Compute the baseline-only rover reachability field ``b_max``."""
+        # baseline rover execution holds one fixed belief snapshot for this rollout,
+        # so cache each source-cell B_en(q' | x, q) once up front.
+        B_en_cache = {
+            (r, c, q): compute_B_en(beliefs[(r, c)], q)
+            for r in range(GRID)
+            for c in range(GRID)
+            for q in FSA_ALL
+        }
+
+        dist = {(rover_pos[0], rover_pos[1], rover_q): 1.0}
+        b_max = {
+            (r, c): sum(dist.get((r, c, q), 0.0) for q in FSA_ALL)
+            for r in range(GRID)
+            for c in range(GRID)
+        }
+
+        for _ in range(T_r):
+            dist_new = {}
+            for (r, c, q), prob in dist.items():
+                if prob < 1e-9:
+                    continue
+                if q in FSA_ACCEPT or q == FSA_DEAD:
+                    dist_new[(r, c, q)] = dist_new.get((r, c, q), 0.0) + prob
+                    continue
+
+                action = rover_policy.get((r, c, q), 1)
+                ben_source = B_en_cache[(r, c, q)]
+                transition_distribution = transition_probabilities(r, c, action, 1.0)
+                for (r2, c2), p_move in transition_distribution.items():
+                    for q_next, p_fsa in ben_source.items():
+                        next_state = (r2, c2, q_next)
+                        dist_new[next_state] = (
+                            dist_new.get(next_state, 0.0) + prob * p_move * p_fsa
+                        )
+            dist = dist_new
+            for r in range(GRID):
+                for c in range(GRID):
+                    cell_reach_probability = sum(
+                        dist.get((r, c, q), 0.0)
+                        for q in FSA_ALL
+                    )
+                    if cell_reach_probability > b_max[(r, c)]:
+                        b_max[(r, c)] = cell_reach_probability
+        return b_max
+
+    def initialise(self, beliefs: dict, rover_pos: tuple, rover_q: int):
+        """Build the initial baseline rover value map, policy, and b_max field."""
+        self.V, self.policy, self.n_expanded = rover_value_iteration(
+            beliefs,
+            vi_steps=self.vi_steps,
+            T_r=self.T_r,
+        )
+        self.b_max = self._compute_b_max(
+            beliefs, self.policy, rover_pos, rover_q, self.T_r
+        )
+        print(f"  Initial VI (baseline): {self.n_expanded} expanded.")
+
+    def replan(self, beliefs_t_plus, beliefs_t, rover_pos, rover_q):
+        """Replan the baseline rover and refresh b_max.
+
+        `beliefs_t` is kept for interface parity with the game path but is
+        unused on the baseline path.
+        """
+        self.V, self.policy, self.n_expanded = rover_value_iteration(
+            beliefs_t_plus,
+            vi_steps=self.vi_steps,
+            T_r=self.T_r,
+        )
+        self.b_max = self._compute_b_max(
+            beliefs_t_plus, self.policy, rover_pos, rover_q, self.T_r
+        )
+
+    def execute(self, beliefs, rover_pos, rover_q):
+        """Execute the baseline rover policy for one epoch."""
+        pos = list(rover_pos)
+        q = rover_q
+        substeps = []
+        belief_snapshots = []
+
+        q_prev = q
         q = fsa_step(q, TRUE_L[tuple(pos)])
+        if q != q_prev:
+            print(
+                f"    FSA transition: q={q_prev} -> q={q} "
+                f"at pos={tuple(pos)}, labels={TRUE_L[tuple(pos)]}"
+            )
 
-        # step 4 fuse the rover's local observation into the shared belief map
         rover_sense(beliefs, tuple(pos))
         substeps.append((tuple(pos), q))
-        if record_beliefs:
+        # The epoch-start state is logged as a substep, but belief snapshots only
+        # track realized post-move rover ticks.
+        if q in FSA_ACCEPT or q == FSA_DEAD:
+            return tuple(pos), q, substeps, belief_snapshots
+
+        for _ in range(self.T_r):
+            if q in FSA_ACCEPT or q == FSA_DEAD:
+                break
+
+            a = self.policy.get((pos[0], pos[1], q), 1)
+            dr, dc = ACTIONS[a]
+            nr, nc = clip(pos[0] + dr, pos[1] + dc)
+            pos = [nr, nc]
+
+            q_prev = q
+            q = fsa_step(q, TRUE_L[tuple(pos)])
+            if q != q_prev:
+                print(
+                    f"    FSA transition: q={q_prev} -> q={q} "
+                    f"at pos={tuple(pos)}, labels={TRUE_L[tuple(pos)]}"
+                )
+
+            rover_sense(beliefs, tuple(pos))
+            substeps.append((tuple(pos), q))
             belief_snapshots.append(copy.deepcopy(beliefs))
 
-    return tuple(pos), q, substeps, belief_snapshots
+        return tuple(pos), q, substeps, belief_snapshots
 
 
-def compute_u_c(V: dict, beliefs: dict, rover_pos: tuple, rover_q: int,
-                copter_substeps: list, alpha: float, lambda_: float,
-                rho: float = 1.0) -> float:
-    """compute the logged copter utility used by the acceptance gate."""
-    # approximation note: this uses the planner value v at the current rover
-    # state as a proxy for the shared mission term g. that matches the shipped
-    # surrogate gate, but is not a full re-evaluation of the counterfactual
-    # rover best response for each copter trajectory.
+class BaselineCopterPlayer(CopterPlayer):
+    """
+    Object wrapper for the baseline copter exploration policy.
 
-    # formula: mission logscore proxy
-    V_phi = V.get((rover_pos[0], rover_pos[1], rover_q), 0.0)
+    The constructor stores only static baseline configuration. The evolving
+    belief map is passed to `explore(...)` each epoch because it changes
+    after every sensing phase.
+    """
 
-    # formula: entropy scout bonus
-    observed = set(copter_substeps)
-    I = sum(H(beliefs[pos]['O']) for pos in observed)
+    def __init__(self, scenario: SimulationScenario):
+        self.copter_mode = scenario.copter_mode
+        self.T_c = scenario.T_c
+        self.alpha = scenario.alpha
+        self.vi_steps = scenario.vi_steps or 80
 
-    # formula: copter trip ledger
-    C_c = 0.0
-    for k in range(len(copter_substeps) - 1):
-        dr = copter_substeps[k][0] - copter_substeps[k+1][0]
-        dc = copter_substeps[k][1] - copter_substeps[k+1][1]
-        C_c += math.sqrt(dr*dr + dc*dc)
-    if copter_substeps:
-        dr = copter_substeps[-1][0] - rover_pos[0]
-        dc = copter_substeps[-1][1] - rover_pos[1]
-        C_c += rho * math.sqrt(dr*dr + dc*dc)
+    def _explore_local(self, beliefs, copter_pos, b_max):
+        """Run the baseline local copter exploration phase."""
+        pos = list(copter_pos)
+        substeps = []
+        belief_snapshots = []
 
-    # formula: mission logscore
-    G = np.log(np.clip(V_phi, 1e-9, 1.0))
+        for _ in range(self.T_c):
+            best_action = plan_copter_action_local(
+                beliefs, tuple(pos), b_max, alpha=self.alpha
+            )
+            pos = self._move_copter(pos, best_action)
 
-    # formula: copter utility ledger
-    return G + alpha * I - lambda_ * C_c
+            copter_sense(beliefs, tuple(pos))
+            substeps.append(tuple(pos))
+            belief_snapshots.append(copy.deepcopy(beliefs))
+
+        # Baseline always commits a fresh local action, so the unified
+        # ``action_changed`` field is always true on this path.
+        return tuple(pos), substeps, belief_snapshots, True
+
+    def _explore_global(self, beliefs, copter_pos, b_max):
+        """Run the baseline global copter exploration phase."""
+        pos = list(copter_pos)
+        substeps = []
+        belief_snapshots = []
+        steps_used = 0
+        max_copter_vi_sweeps = 0
+
+        while steps_used < self.T_c:
+            target_cell, copter_policy, copter_vi_sweeps = (
+                plan_copter_action_global(
+                    beliefs,
+                    tuple(pos),
+                    b_max,
+                    alpha=self.alpha,
+                    vi_steps=self.vi_steps,
+                )
+            )
+            if target_cell is None:
+                break
+            max_copter_vi_sweeps = max(max_copter_vi_sweeps, copter_vi_sweeps)
+
+            while tuple(pos) != target_cell and steps_used < self.T_c:
+                action = copter_policy.get(tuple(pos), 0)
+                pos = self._move_copter(pos, action)
+
+                copter_sense(beliefs, tuple(pos))
+                substeps.append(tuple(pos))
+                belief_snapshots.append(copy.deepcopy(beliefs))
+                steps_used += 1
+
+        print(
+            f"  Copter value iteration maximum sweeps used "
+            f"{max_copter_vi_sweeps}/{self.vi_steps}."
+        )
+
+        # baseline global mode also commits a fresh epoch plan every time.
+        return tuple(pos), substeps, belief_snapshots, True
+
+    def explore(self, beliefs: dict, copter_pos: tuple, b_max: dict) -> tuple:
+        """Run one baseline copter exploration phase."""
+        if self.copter_mode == 'local':
+            return self._explore_local(beliefs, copter_pos, b_max)
+        if self.copter_mode == 'global':
+            return self._explore_global(beliefs, copter_pos, b_max)
+        raise ValueError(
+            f"Unsupported baseline copter_mode={self.copter_mode!r}; "
+            "baseline supports only 'local' or 'global'."
+        )
+
+
+class GameRoverPlayer:
+    """Game-theoretic rover runtime wrapper around D* Lite."""
+
+    def __init__(self, scenario: SimulationScenario):
+        self.T_r = scenario.T_r
+        self.gamma = scenario.gamma
+        self.tau_r = scenario.tau_r
+        self.spatial = grid_to_graph()
+        self.planner = None
+        self.V = {}
+        self.policy = {}
+        self.n_expanded = 0
+
+    def initialise(self, beliefs: dict):
+        """Build the initial game-theoretic rover planner."""
+        self.planner = DStarLitePlanner(
+            self.spatial,
+            beliefs,
+            gamma = self.gamma,
+            tau_r = self.tau_r,
+        )
+        self.V, self.policy, self.n_expanded = self.planner.solution()
+        print(f"  Initial D* Lite: {self.n_expanded} expanded.")
+
+    def replan(self, beliefs_t_plus, beliefs_t):
+        """Replan the game-theoretic rover on the split-belief map."""
+        self.V, self.policy, self.n_expanded = self.planner.replan(
+            beliefs_t_plus,
+            risk_beliefs = beliefs_t,
+        )
+
+    def execute(self, beliefs, rover_pos, rover_q):
+        """Execute the game-theoretic rover policy for one epoch."""
+        pos = list(rover_pos)
+        q = rover_q
+        substeps = [(tuple(pos), q)]
+        belief_snapshots = []
+
+        for _ in range(self.T_r):
+            if q in FSA_ACCEPT or q == FSA_DEAD:
+                break
+
+            a = self.policy.get((pos[0], pos[1], q), 1)
+            dr, dc = ACTIONS[a]
+            nr, nc = clip(pos[0] + dr, pos[1] + dc)
+            pos = [nr, nc]
+
+            q = fsa_step(q, TRUE_L[tuple(pos)])
+            rover_sense(beliefs, tuple(pos))
+            substeps.append((tuple(pos), q))
+            belief_snapshots.append(copy.deepcopy(beliefs))
+
+        return tuple(pos), q, substeps, belief_snapshots
+
+
+class GameCopterPlayer(CopterPlayer):
+    """
+    Object wrapper for the game-theoretic copter exploration policy.
+
+    The constructor stores only static game parameters. The current belief
+    map, rover position, and remaining distance budget are epoch-dependent state, so
+    they are passed to `explore(...)` rather than fixed at initialization.
+    """
+
+    def __init__(self, scenario: SimulationScenario):
+        self.T_c = scenario.T_c
+        self.alpha = scenario.alpha
+        self.lambda_ = scenario.lambda_
+        self.rho = scenario.rho
+
+    def explore(self, beliefs: dict, copter_pos: tuple,
+                rover_pos: tuple = (0, 0),
+                distance_budget: float = float('inf')) -> tuple:
+        """Run one game-theoretic copter exploration phase."""
+        pos = list(copter_pos)
+        substeps = []
+        belief_snapshots = []
+
+        action_sequence = plan_copter_action_game(
+            beliefs,
+            tuple(pos),
+            self.T_c,
+            alpha=self.alpha,
+            lambda_=self.lambda_,
+            rover_pos=rover_pos,
+            distance_budget=distance_budget,
+            rho=self.rho,
+        )
+        if action_sequence is None:
+            return tuple(copter_pos), [], [], False
+
+        for action in action_sequence:
+            pos = self._move_copter(pos, action)
+            copter_sense(beliefs, tuple(pos))
+            substeps.append(tuple(pos))
+            belief_snapshots.append(copy.deepcopy(beliefs))
+
+        return tuple(pos), substeps, belief_snapshots, True

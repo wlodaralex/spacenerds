@@ -1,36 +1,35 @@
 """
-planning.py - Value iteration (VI) and reachability belief (b_max).
+planning.py
 
-Setup:
-    - Copter planning pipeline:
-        - Value iteration
+- build rover planners and copter path selectors
+- provide reachability, entropy, and automaton helpers used during planning
 
-    - Rover planning pipeline:
-        - Value iteration over the product belief MDP (Section 4.3.2: Eqs. 20-21 & Algorithm 4).
-        - Reachability belief b_max used by the copter's acquisition function to bias 
-          exploration toward the rover's likely path (Section 4.3.3).
+class
+- `DStarLitePlanner`: incremental rover planner on the product graph
 
-    - Product MDP state space - (cell, FSA_state) (Section 4.3.2 Remark 1):
-        - Beliefs enter only through B_en weights (not part of the state space).
-        - Reduced complexity O(|X|^2 |Q|^2 |U|) with polynomial in |X| versus 
-          the exponential complexity in |X| of prior work that includes belief states explicitly.
-    
-    - Design decision:
-        - Implemented convergence check as the paper assumes VI runs to convergence but does not specify a sweep count.
-            - This implementation runs at most 'T_steps' sweeps and stops early if the maximum 
-              change in V across all states falls below a set tolerance.
-        - Optional: stay-action guard for large T_r as algorithm can 'trap' the rover at a high-belief cell where V_stay > V_move.
-            - This belief-induced local maximum for small T_r is self-corrected at the next replanning cycle, but for larger
-              the freeze is enough to look like a hang.
-            - See CHANGELOG.md.
+function
+- `grid_to_graph`: build the spatial graph
+- `plan_copter_action_local`: choose one local baseline copter action
+- `plan_copter_action_global`: choose one global baseline target and policy
+- `plan_copter_action_game`: choose the best feasible game copter sequence
 """
+
+import heapq
+import math
+
 import numpy as np
-# from numpy import random
 
 from environment import GRID, ACTIONS, clip, transition_probabilities
-from fsa import FSA_ACCEPT, FSA_DEAD, FSA_ALL, fsa_step, ALL_SUBSETS, compute_B_en
+from fsa import FSA_ACCEPT, FSA_DEAD, FSA_ALL, compute_B_en
+from sensor import sensor_beta
 
 
+# --- Shared Planner State ---
+_COPTER_FOOTPRINT_MASK = None
+_UTILITY_ROLLOUT_CACHE = {}
+
+
+# --- Public Helpers ---
 def grid_to_graph() -> dict:
     """build the spatial adjacency graph for the grid."""
     adjacency_by_cell = {}
@@ -39,6 +38,8 @@ def grid_to_graph() -> dict:
             neighbor_cells = []
             for action_index in range(1, len(ACTIONS)):   # skip stay (action 0)
                 # step 1 encode the 8-connected spatial graph used by both planners
+                # design note: the spatial graph excludes stay, so rover planning
+                # always reasons over moving actions rather than waiting in place
                 dr, dc = ACTIONS[action_index]
                 nr, nc = clip(r + dr, c + dc)
                 if (nr, nc) != (r, c):
@@ -47,246 +48,244 @@ def grid_to_graph() -> dict:
     return adjacency_by_cell
 
 
-_FSA_DIST_CACHE = None
-
-def _fsa_distances() -> dict:
-    """cache the minimum automaton hops from each q to acceptance."""
-    global _FSA_DIST_CACHE
-    if _FSA_DIST_CACHE is not None:
-        return _FSA_DIST_CACHE
-
-    distance_to_accept = {q: float('inf') for q in FSA_ALL}
-    for q in FSA_ACCEPT:
-        distance_to_accept[q] = 0
-
-    reverse_automaton = {q: [] for q in FSA_ALL}
-    for q in FSA_ALL:
-        if q in FSA_ACCEPT or q == FSA_DEAD:
-            continue
-        visited_successors = set()
-        for label_subset in ALL_SUBSETS:
-            # step 1 enumerate unique automaton successors under realized labels
-            q_next = fsa_step(q, label_subset)
-            if q_next not in visited_successors:
-                visited_successors.add(q_next)
-                reverse_automaton[q_next].append(q)
-
-    queue = deque(q for q in FSA_ACCEPT)
-    while queue:
-        # step 2 reverse bfs gives the minimum remaining automaton hops
-        q_current = queue.popleft()
-        for q_prev in reverse_automaton[q_current]:
-            if distance_to_accept[q_prev] == float('inf'):
-                distance_to_accept[q_prev] = (
-                    distance_to_accept[q_current] + 1
-                )
-                queue.append(q_prev)
-    _FSA_DIST_CACHE = distance_to_accept
-    return _FSA_DIST_CACHE
+def binary_entropy(belief: float) -> float:
+    """Return binary Shannon entropy for one Bernoulli belief."""
+    belief = np.clip(belief, 1e-9, 1 - 1e-9)
+    return -belief * np.log2(belief) - (1 - belief) * np.log2(1 - belief)
 
 
-class VIPlanner:
-    """full value iteration for the stochastic baseline rover."""
+def _baseline_b_en_cache(beliefs):
+    """Cache baseline ``B_en`` values for one fixed belief snapshot."""
+    return {
+        (r, c, q): compute_B_en(beliefs[(r, c)], q)
+        for r in range(GRID)
+        for c in range(GRID)
+        for q in FSA_ALL
+        if q not in FSA_ACCEPT and q != FSA_DEAD
+    }
 
-    def __init__(self, spatial, beliefs, vi_steps=80, p_rover=0.95):
-        self.spatial = spatial
-        self.beliefs = beliefs
-        self.vi_steps = vi_steps
-        self.p_rover = p_rover
-        self.n_expanded = 0
-        self._nodes = [
-            (r, c, q)
-            for r in range(GRID)
-            for c in range(GRID)
-            for q in FSA_ALL
-        ]
-        self._state_index_by_node = {
-            node: state_index
-            for state_index, node in enumerate(self._nodes)
-        }
-        self._accept_state_index = tuple(
-            self._state_index_by_node[node]
-            for node in self._nodes
-            if node[2] in FSA_ACCEPT
-        )
-        self._nonterminal_nodes = list(self._nonterminal_states())
-        self._nonterminal_state_index = tuple(
-            self._state_index_by_node[(r, c, q)]
-            for r, c, q in self._nonterminal_nodes
-        )
-        self._transitions = {
-            (r, c, action_index): transition_probabilities(
-                r, c, action_index, self.p_rover
+
+# --- Baseline Copter Planning ---
+def acquisition_function(beliefs, b_max, alpha):
+    """Return the baseline copter acquisition function W(x)."""
+    acquisition_values = {}
+    for r in range(GRID):
+        for c in range(GRID):
+            acquisition_values[(r, c)] = (
+                binary_entropy(beliefs[(r, c)]['O'])
+                + alpha * b_max.get((r, c), 0.0)
             )
-            for r in range(GRID)
-            for c in range(GRID)
-            for action_index in range(len(ACTIONS))
-        }
-        self.V, self.policy = self._solve(beliefs)
+    return acquisition_values
 
-    def _belief_transition_cache(self, beliefs):
-        """cache automaton transitions for one fixed belief snapshot."""
-        # formula: branch-probability kernel
-        # b_en(x', q -> q') is frozen for one value-iteration solve
-        return {
-            (r, c, q): compute_B_en(
-                beliefs[(r, c)], q
-            )
-            for r in range(GRID)
-            for c in range(GRID)
-            for q in FSA_ALL
-            if q not in FSA_ACCEPT and q != FSA_DEAD
-        }
 
-    def _combined_transition_cache(self, beliefs):
-        """cache combined spatial and automaton outcomes for one solve.
+def plan_copter_action_local(beliefs, copter_pos, b_max, alpha=1.5):
+    """Return the next baseline local copter action."""
+    acquisition_values = acquisition_function(beliefs, b_max, alpha)
 
-        this precomputes the sparse bellman kernel
+    best_action, best_expected_value = 0, -np.inf
+    for action_index in range(len(ACTIONS)):
+        transition_distribution = transition_probabilities(
+            copter_pos[0], copter_pos[1], action_index, p_intended=1.0
+        )
+        expected_value = sum(
+            probability * acquisition_values.get(destination_cell, 0.0)
+            for destination_cell, probability in transition_distribution.items()
+        )
+        if expected_value > best_expected_value:
+            best_action, best_expected_value = action_index, expected_value
+    return best_action
 
-            P_u(i, j) = sum_x' P(x' | x, u) B_en(x', q -> q_j)
 
-        where i indexes one product state (r, c, q) and j indexes one
-        destination product state. with that cache, the backup becomes
+def plan_copter_action_global(beliefs, copter_pos, b_max,
+                              alpha=1.5, vi_steps=80):
+    """Return the current baseline global copter target and policy."""
+    acquisition_values = acquisition_function(beliefs, b_max, alpha)
+    candidate_values = {
+        cell: value
+        for cell, value in acquisition_values.items()
+        if cell != tuple(copter_pos)
+    }
+    if not candidate_values:
+        return None, {}, 0
 
-            V_{k+1}(i) = max_u sum_j P_u(i, j) V_k(j)
+    target_cell = max(candidate_values, key=candidate_values.get)
+    copter_policy, copter_vi_sweeps = copter_value_iteration(
+        target_cell, vi_steps=vi_steps
+    )
+    return target_cell, copter_policy, copter_vi_sweeps
 
-        so the inner loop no longer rebuilds tuple-key dict lookups for every
-        sweep. the result is exactly the same stochastic backup, only flattened
-        into indexed sparse outcomes.
-        """
-        belief_transition_cache = self._belief_transition_cache(beliefs)
-        combined_transition_cache = [None] * len(self._nodes)
-        for r, c, q in self._nonterminal_nodes:
-            state_index = self._state_index_by_node[(r, c, q)]
-            action_outcomes = []
-            for action_index in range(len(ACTIONS)):
-                destination_probability = {}
-                for (nr, nc), transition_probability in self._transitions[
-                    (r, c, action_index)
-                ].items():
-                    for q_next, automaton_probability in belief_transition_cache[
-                        (nr, nc, q)
-                    ].items():
-                        destination_index = self._state_index_by_node[
-                            (nr, nc, q_next)
-                        ]
-                        destination_probability[destination_index] = (
-                            destination_probability.get(destination_index, 0.0)
-                            + transition_probability * automaton_probability
-                        )
-                action_outcomes.append(tuple(destination_probability.items()))
-            combined_transition_cache[state_index] = tuple(action_outcomes)
-        return combined_transition_cache
 
-    @staticmethod
-    def _nonterminal_states():
-        """iterate over product states that need backups."""
+def copter_value_iteration(target, vi_steps=80, tol=1e-3):
+    """Copter value iteration.
+
+    Solve the point-to-point reachability problem to reach ``target``.
+
+    This keeps the baseline control flow but uses the current deterministic motion:
+        - deterministic transition kernel with ``p_intended = 1.0``
+        - randomized tie-breaking among equally optimal actions
+        - convergence tolerance ``1e-3``
+    """
+    V = {}
+    for r in range(GRID):
+        for c in range(GRID):
+            V[(r, c)] = 1.0 if (r, c) == target else 0.0
+
+    copter_policy = {}
+    for sweep in range(vi_steps):
+        V_new = {}
+        delta = 0.0
         for r in range(GRID):
             for c in range(GRID):
-                for q in FSA_ALL:
-                    if q not in FSA_ACCEPT and q != FSA_DEAD:
-                        yield r, c, q
+                if (r, c) == target:
+                    V_new[(r, c)] = 1.0
+                    copter_policy[(r, c)] = 0
+                    continue
+                best_val = -1.0
+                candidates = []
+                for a in range(1, len(ACTIONS)):
+                    transition_distribution = transition_probabilities(
+                        r, c, a, p_intended=1.0
+                    )
+                    val = sum(
+                        probability * V.get(destination_cell, 0.0)
+                        for destination_cell, probability
+                        in transition_distribution.items()
+                    )
+                    if val > best_val + 1e-4:
+                        best_val = val
+                        candidates = [a]
+                    elif abs(val - best_val) < 1e-4:
+                        candidates.append(a)
+                V_new[(r, c)] = best_val
+                copter_policy[(r, c)] = np.random.choice(candidates)
+                delta = max(delta, abs(best_val - V.get((r, c), 0.0)))
+        V = V_new
+        if delta < tol:
+            return copter_policy, sweep + 1
+    return copter_policy, vi_steps
 
-    def _action_value(
-        self,
-        value_by_index,
-        combined_transition_cache,
-        state_index,
-        action_index,
-    ):
-        """evaluate one bellman term for one action."""
-        action_value = 0.0
-        for destination_index, outcome_probability in combined_transition_cache[
-            state_index
-        ][action_index]:
-            action_value += outcome_probability * value_by_index[destination_index]
-        return action_value
+# --- Copter Shared Helpers ---
+def copter_footprint_mask():
+    """Cache the copter sensor footprint for every grid cell."""
+    global _COPTER_FOOTPRINT_MASK
+    if _COPTER_FOOTPRINT_MASK is not None:
+        return _COPTER_FOOTPRINT_MASK
 
-    def _best_action_value(
-        self, value_by_index, combined_transition_cache, state_index
-    ):
-        """return the best bellman value and its action."""
-        best_action_index, best_action_value = 0, 0.0
-        for action_index in range(len(ACTIONS)):
-            candidate_value = self._action_value(
-                value_by_index,
-                combined_transition_cache,
-                state_index,
-                action_index,
-            )
-            if candidate_value > best_action_value:
-                best_action_value = candidate_value
-                best_action_index = action_index
-        return best_action_value, best_action_index
+    footprint_mask = np.zeros((GRID * GRID, GRID * GRID), dtype=bool)
+    for r in range(GRID):
+        for c in range(GRID):
+            src_index = r * GRID + c
+            for rr in range(max(0, r - 4), min(GRID, r + 5)):
+                for cc in range(max(0, c - 4), min(GRID, c + 5)):
+                    if sensor_beta((r, c), (rr, cc), 4, 0.4) > 0.5:
+                        footprint_mask[src_index, rr * GRID + cc] = True
 
-    def _solve(self, beliefs):
-        # step 1 freeze the sparse bellman kernel for this belief snapshot
-        combined_transition_cache = self._combined_transition_cache(beliefs)
-
-        # step 2 initialize the value function with acceptance as value 1
-        value_by_index = [0.0] * len(self._nodes)
-        for state_index in self._accept_state_index:
-            value_by_index[state_index] = 1.0
-
-        converged_at = self.vi_steps
-        for sweep in range(self.vi_steps):
-            # step 3 apply one full stochastic bellman sweep
-            updated_value_by_index = value_by_index.copy()
-            maximum_change = 0.0
-            for state_index in self._nonterminal_state_index:
-                best_value, _ = self._best_action_value(
-                    value_by_index,
-                    combined_transition_cache,
-                    state_index,
-                )
-                updated_value_by_index[state_index] = best_value
-                maximum_change = max(
-                    maximum_change,
-                    abs(best_value - value_by_index[state_index]),
-                )
-            value_by_index = updated_value_by_index
-            if maximum_change < 1e-6:
-                converged_at = sweep + 1
-                break
-
-        # step 4 report the number of bellman sweeps as the planner workload
-        self.n_expanded = converged_at
-
-        # step 5 extract the greedy action under the converged value function
-        policy = {}
-        for state_index, node in enumerate(self._nodes):
-            r, c, q = node
-            if q in FSA_ACCEPT or q == FSA_DEAD:
-                policy[node] = 0
-                continue
-            _, best_action_index = self._best_action_value(
-                value_by_index,
-                combined_transition_cache,
-                state_index,
-            )
-            policy[node] = best_action_index
-        value_function = {
-            node: value_by_index[state_index]
-            for state_index, node in enumerate(self._nodes)
-        }
-        return value_function, policy
-
-    def solution(self):
-        """return the current planner solution."""
-        return self.V, self.policy, self.n_expanded
-
-    def replan(self, beliefs, risk_beliefs=None):
-        """re-solve from scratch after belief updates."""
-        # step 1 vi is non-incremental, so replanning is a full resolve
-        self.beliefs = beliefs
-        self.V, self.policy = self._solve(beliefs)
-        return self.V, self.policy, self.n_expanded
+    _COPTER_FOOTPRINT_MASK = footprint_mask
+    return _COPTER_FOOTPRINT_MASK
 
 
+# --- Game Copter Planning ---
+def _copter_rollout_cache(horizon: int):
+    """Cache action sequences and per-step motion deltas for one horizon."""
+    cached_rollout = _UTILITY_ROLLOUT_CACHE.get(horizon)
+    if cached_rollout is not None:
+        return cached_rollout
+
+    from itertools import product as iproduct
+
+    sequence_actions = np.array(
+        list(iproduct(range(len(ACTIONS)), repeat=horizon)),
+        dtype=np.int8,
+    )
+    action_row_delta = np.array([dr for dr, _ in ACTIONS], dtype=np.int8)
+    action_col_delta = np.array([dc for _, dc in ACTIONS], dtype=np.int8)
+
+    cached_rollout = {
+        'sequence_actions': sequence_actions,
+        'row_delta_by_sequence': action_row_delta[sequence_actions],
+        'col_delta_by_sequence': action_col_delta[sequence_actions],
+    }
+    _UTILITY_ROLLOUT_CACHE[horizon] = cached_rollout
+    return cached_rollout
+
+
+def plan_copter_action_game(beliefs, copter_pos, T_c, alpha=1.5,
+                            lambda_=0.0, rover_pos=(0, 0),
+                            distance_budget=float('inf'), rho=1.0):
+    """Return the best feasible game-theoretic copter action sequence."""
+    # Inline this entropy field for vectorized batch scoring; the single-path
+    # metric helper computes the same quantity after one path is committed.
+    entropy_flat = np.array(
+        [
+            binary_entropy(beliefs[(r, c)]['O'])
+            for r in range(GRID)
+            for c in range(GRID)
+        ],
+        dtype=np.float64,
+    )
+    footprint_mask_by_cell = copter_footprint_mask()
+
+    rollout_cache = _copter_rollout_cache(T_c)
+    sequence_actions = rollout_cache['sequence_actions']
+    row_delta_by_sequence = rollout_cache['row_delta_by_sequence']
+    col_delta_by_sequence = rollout_cache['col_delta_by_sequence']
+
+    row_position = np.full(len(sequence_actions), copter_pos[0], dtype=np.int16)
+    col_position = np.full(len(sequence_actions), copter_pos[1], dtype=np.int16)
+    flight_cost = np.zeros(len(sequence_actions), dtype=np.float64)
+    observed_by_sequence = np.zeros(
+        (len(sequence_actions), GRID * GRID),
+        dtype=bool,
+    )
+
+    for horizon_index in range(T_c):
+        next_row_position = np.clip(
+            row_position + row_delta_by_sequence[:, horizon_index],
+            0,
+            GRID - 1,
+        )
+        next_col_position = np.clip(
+            col_position + col_delta_by_sequence[:, horizon_index],
+            0,
+            GRID - 1,
+        )
+
+        flight_cost += np.hypot(
+            next_row_position - row_position,
+            next_col_position - col_position,
+        )
+
+        row_position = next_row_position
+        col_position = next_col_position
+        cell_index = row_position * GRID + col_position
+        observed_by_sequence |= footprint_mask_by_cell[cell_index]
+
+    information_gain = np.sum(
+        observed_by_sequence * entropy_flat[None, :],
+        axis=1,
+        dtype=np.float64,
+    )
+
+    return_cost = rho * np.hypot(
+        row_position - rover_pos[0],
+        col_position - rover_pos[1],
+    )
+    total_cost = flight_cost + return_cost
+    feasible_sequence = total_cost <= distance_budget
+    if not np.any(feasible_sequence):
+        return None
+
+    score_by_sequence = alpha * information_gain - lambda_ * total_cost
+    feasible_score = np.where(feasible_sequence, score_by_sequence, -np.inf)
+    best_sequence_index = int(np.argmax(feasible_score))
+    return tuple(int(action) for action in sequence_actions[best_sequence_index])
+
+
+# --- D* Lite Planner ---
 class DStarLitePlanner:
     """incremental d* lite on the product graph."""
 
-    def __init__(self, spatial, beliefs, gamma=0.0, tau_r=1.0,
+    def __init__(self, spatial, beliefs, gamma=0.0, tau_r=0.9,
                  *, risk_beliefs=None, use_h2: bool = False,
                  use_h6: bool = False):
         self.spatial = spatial
@@ -364,8 +363,8 @@ class DStarLitePlanner:
 
     def _set_beliefs(self, mission_beliefs, risk_beliefs=None):
         """set mission and risk belief snapshots for rover planning."""
-        # formula: split-belief rover utility
-        # mission beliefs carry b_t^+ for g, risk beliefs carry b_t for c_r
+        # formula: split-belief rover utility (Formulation §6 and §13)
+        # mission beliefs carry B_t^+ for G, risk beliefs carry B_t for C_r
         self._mission_beliefs = mission_beliefs
         self._risk_beliefs = mission_beliefs if risk_beliefs is None else risk_beliefs
         self.beliefs = self._mission_beliefs
@@ -381,7 +380,7 @@ class DStarLitePlanner:
 
     @staticmethod
     def _needed_aps(q):
-        # formula: progress alphabet
+        # formula: progress alphabet (Formulation §1, remaining mission labels)
         # these are the atomic propositions that can still advance the mission
         required_atomic_propositions = {
             0: ('A', 'B', 'C'),
@@ -391,7 +390,7 @@ class DStarLitePlanner:
         return required_atomic_propositions.get(q, ())
 
     def _key(self, state):
-        # formula: d* queue key
+        # formula: d* queue key (D* Lite implementation, Formulation §13)
         # k(s) = (min(g, rhs) + h, min(g, rhs))
         best_estimate = min(self.g[state], self.rhs[state])
         heuristic_value = (
@@ -433,6 +432,15 @@ class DStarLitePlanner:
         """return the smallest positive edge cost in the current graph."""
         return self._c_min_plus
 
+    @staticmethod
+    def _zero_terminal_heuristic_values(heuristic_values):
+        """Set all accepting and dead heuristic values to zero."""
+        for r in range(GRID):
+            for c in range(GRID):
+                for q in FSA_ACCEPT:
+                    heuristic_values[(r, c, q)] = 0.0
+                heuristic_values[(r, c, FSA_DEAD)] = 0.0
+
     def _compute_h2(self):
         """build the admissible chebyshev heuristic h2."""
         heuristic_values = {}
@@ -454,7 +462,7 @@ class DStarLitePlanner:
             for r in range(GRID):
                 for c in range(GRID):
                     if target_cells:
-                        # formula: chebyshev lower bound
+                        # formula: chebyshev lower bound (Formulation §12, h2)
                         chebyshev_distance = min(
                             max(abs(r - target_r), abs(c - target_c))
                             for target_r, target_c in target_cells
@@ -465,12 +473,7 @@ class DStarLitePlanner:
                         chebyshev_distance * self._c_min_plus
                     )
 
-        for r in range(GRID):
-            for c in range(GRID):
-                for q in FSA_ACCEPT:
-                    heuristic_values[(r, c, q)] = 0.0
-                heuristic_values[(r, c, FSA_DEAD)] = 0.0
-
+        self._zero_terminal_heuristic_values(heuristic_values)
         self._tq_sizes = target_set_sizes
         return heuristic_values
 
@@ -512,7 +515,7 @@ class DStarLitePlanner:
                         1e-9,
                         min(1.0 - 1e-9, self._risk_beliefs[current_cell]['O']),
                     )
-                    # formula: risk-only corridor bound
+                    # formula: risk-only corridor bound (Formulation §12, h6)
                     edge_risk = self.gamma * (-math.log(1.0 - obstacle_belief))
                     candidate_cost = path_cost + edge_risk
                     if candidate_cost < distance_to_target[predecessor_cell]:
@@ -525,12 +528,7 @@ class DStarLitePlanner:
                         distance_to_target[(r, c)]
                     )
 
-        for r in range(GRID):
-            for c in range(GRID):
-                for q in FSA_ACCEPT:
-                    heuristic_values[(r, c, q)] = 0.0
-                heuristic_values[(r, c, FSA_DEAD)] = 0.0
-
+        self._zero_terminal_heuristic_values(heuristic_values)
         self._tq_sizes = target_set_sizes
         return heuristic_values
 
@@ -643,7 +641,7 @@ class DStarLitePlanner:
     def _update(self, state):
         """recompute rhs(state) and queue it if inconsistent."""
         if state[2] not in FSA_ACCEPT:
-            # formula: one-step rhs backup
+            # formula: one-step rhs backup (D* Lite implementation, Formulation §13)
             # rhs(s) = min_{s'} c(s,s') + g(s')
             best_rhs_value = float('inf')
             for destination_state, _, edge_cost in self._succ(state):
@@ -693,6 +691,7 @@ class DStarLitePlanner:
 
             current_key = self._key(state)
             if popped_key < current_key:
+                # Re-enqueue with the corrected key while reusing ``current_key``.
                 self._cnt += 1
                 heapq.heappush(self._heap, (current_key, self._cnt, state))
                 self._keys[state] = (current_key, self._cnt)
@@ -753,8 +752,9 @@ class DStarLitePlanner:
         for node in self._nodes:
             r, c, q = node
             path_cost = self.g[node]
-            # formula: exp-of-cost value map
-            # v = exp(-g) is the multiplicative path score recovered from d*
+            # Formula: exp-of-cost value map (Formulation §7 and §13, V = exp(-g)).
+            # When gamma > 0 this stored value is the remaining rover path score
+            # exp(G_future - gamma C_r_future), not a pure mission-success V_phi.
             value_function[node] = (
                 0.0 if path_cost == float('inf') else math.exp(-path_cost)
             )
@@ -763,7 +763,7 @@ class DStarLitePlanner:
                 continue
             best_action_index, best_total_cost = 1, float('inf')
             for destination_state, action_index, edge_cost in self._succ(node):
-                # formula: greedy q backup
+                # formula: greedy q backup (Formulation §13, rover best response)
                 total_cost = edge_cost + self.g.get(destination_state, float('inf'))
                 if total_cost < best_total_cost:
                     best_total_cost = total_cost
@@ -771,62 +771,66 @@ class DStarLitePlanner:
             policy[node] = best_action_index
         return value_function, policy, self.n_expanded
 
-def d_star_lite_plan(spatial, beliefs, gamma=0.0, tau_r=1.0, risk_beliefs=None):
-    """run one one-shot d* lite solve."""
-    planner = DStarLitePlanner(
-        spatial, beliefs, gamma, tau_r, risk_beliefs=risk_beliefs
-    )
-    return planner.solution()
+def rover_value_iteration(beliefs, vi_steps=80, T_r=3, tol=1e-3):
+    """Rover product-MDP value iteration.
 
-def compute_b_max(spatial: dict, beliefs: dict, policy: dict,
-                  rover_pos: tuple, rover_q: int, T_r: int) -> dict:
-    """compute the rover reachability belief used by the Hashimoto copter."""
-    # formula: forward reachability plume
-    reach_probability = {(rover_pos[0], rover_pos[1], rover_q): 1.0}
-    b_max = {(r, c): 0.0 for r in range(GRID) for c in range(GRID)}
-    b_max[(rover_pos[0], rover_pos[1])] = 1.0
+    Solve the finite-horizon reachability problem on the product belief MDP.
 
-    for _ in range(T_r):
-        # step 1 push one rover policy step through the belief-weighted fsa
-        next_reach_probability = {}
-        for (r, c, q), state_probability in reach_probability.items():
-            if state_probability < 1e-9:
-                continue
-            if q in FSA_ACCEPT or q == FSA_DEAD:
-                next_reach_probability[(r, c, q)] = (
-                    next_reach_probability.get((r, c, q), 0.0)
-                    + state_probability
-                )
-                continue
+    This keeps the baseline control flow but uses the current deterministic motion:
+        - deterministic rover motion with ``p_intended = 1.0``
+        - source-cell automaton transitions ``B_en(x, q -> q')``
+        - randomized tie-breaking among equally optimal actions
+        - convergence tolerance ``1e-3``
+    """
+    cells = [(r, c) for r in range(GRID) for c in range(GRID)]
 
-            action_index = policy.get((r, c, q), 1)
-            destination_by_action = {
-                available_action_index: destination_cell
-                for destination_cell, available_action_index in spatial[(r, c)]
-            }
-            nr, nc = destination_by_action.get(
-                action_index, (r, c)
-            )
-            for q_next, automaton_probability in compute_B_en(
-                beliefs[(nr, nc)], q
-            ).items():
-                # step 2 spread mass over automaton successors at the destination
-                next_state = (nr, nc, q_next)
-                next_reach_probability[next_state] = (
-                    next_reach_probability.get(next_state, 0.0)
-                    + state_probability * automaton_probability
-                )
+    V = {}
+    for r, c in cells:
+        for q in FSA_ALL:
+            V[(r, c, q)] = 1.0 if q in FSA_ACCEPT else 0.0
 
-        reach_probability = next_reach_probability
+    # Beliefs are fixed for one VI call, so cache source-cell B_en once.
+    B_en_cache = _baseline_b_en_cache(beliefs)
 
-        for r in range(GRID):
-            for c in range(GRID):
-                # step 3 b_max keeps the best cell reachability seen so far
-                cell_reach_probability = sum(
-                    reach_probability.get((r, c, q), 0.0)
-                    for q in FSA_ALL
-                )
-                if cell_reach_probability > b_max[(r, c)]:
-                    b_max[(r, c)] = cell_reach_probability
+    rover_policy = {}
+    # For longer rover phases, exclude stay to avoid frozen high-belief local
+    # maxima from dominating the finite-horizon baseline rollout.
+    action_range = range(1, len(ACTIONS)) if T_r > 5 else range(len(ACTIONS))
 
-    return b_max
+    for sweep in range(vi_steps):
+        V_new = {}
+        delta = 0.0
+        for r, c in cells:
+            for q in FSA_ALL:
+                if q in FSA_ACCEPT:
+                    V_new[(r, c, q)] = 1.0
+                    rover_policy[(r, c, q)] = 0
+                    continue
+                if q == FSA_DEAD:
+                    V_new[(r, c, q)] = 0.0
+                    rover_policy[(r, c, q)] = 0
+                    continue
+                ben_source = B_en_cache.get((r, c, q), {})
+                best_val = -1.0
+                candidates = []
+                for a in action_range:
+                    transition_distribution = transition_probabilities(
+                        r, c, a, p_intended=1.0
+                    )
+                    val = 0.0
+                    for (r2, c2), p_move in transition_distribution.items():
+                        # Baseline alignment: evaluate B_en at the source cell.
+                        for q_next, p_fsa in ben_source.items():
+                            val += p_move * p_fsa * V.get((r2, c2, q_next), 0.0)
+                    if val > best_val + 1e-5:
+                        best_val = val
+                        candidates = [a]
+                    elif abs(val - best_val) < 1e-5:
+                        candidates.append(a)
+                V_new[(r, c, q)] = best_val
+                rover_policy[(r, c, q)] = np.random.choice(candidates)
+                delta = max(delta, abs(best_val - V.get((r, c, q), 0.0)))
+        V = V_new
+        if delta < tol:
+            return V, rover_policy, sweep + 1
+    return V, rover_policy, vi_steps
