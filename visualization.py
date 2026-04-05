@@ -39,7 +39,7 @@ PATH_LINEWIDTH = 2.5
 AP_OVERLAY_FONT_SIZE = 10
 AP_OVERLAY_COMPACT_FONT_SIZE = 10
 AP_OVERLAY_LINESPACING = 1.5
-LEGEND_FONT_SIZE = 12
+LEGEND_FONT_SIZE = 11
 
 
 def _is_baseline_history(history: dict) -> bool:
@@ -183,8 +183,8 @@ def _figure_header_layout(*, has_subtitle: bool,
         top_margin = 0.98
 
     return {
-        'title_font_size': 14,
-        'meta_font_size': 12,
+        'title_font_size': 11,
+        'meta_font_size': 11,
         'suptitle_y': suptitle_y,
         'subtitle_gap': subtitle_gap,
         'metadata_gap': metadata_gap,

@@ -141,6 +141,8 @@ class SimHistory:
         copter_mode = self.params.get('copter_mode')
         rho = self.params.get('rho')
         D_c_budget = self.params.get('D_c_budget')
+        copter_top_k = self.params.get('copter_top_k')
+        copter_mc_samples = self.params.get('copter_mc_samples')
         rover_path_length = self.rover_path_length()
         copter_path_length = self.copter_path_length()
         solve_time_s = self.meta.get('solve_time_s')
@@ -157,6 +159,8 @@ class SimHistory:
                 'lambda': lambda_,
                 'rho': rho,
                 'D_c_budget': D_c_budget,
+                'copter_top_k': copter_top_k,
+                'copter_mc_samples': copter_mc_samples,
                 'Phi': e.Phi, 'G': e.G,
                 'C_r': e.C_r, 'C_c': e.C_c, 'I': e.I,
                 'u_r': e.u_r, 'u_c': e.u_c,
@@ -211,6 +215,8 @@ class SimHistory:
             'lambda_': self.params.get('lambda_'),
             'rho': self.params.get('rho'),
             'D_c_budget': self.params.get('D_c_budget'),
+            'copter_top_k': self.params.get('copter_top_k'),
+            'copter_mc_samples': self.params.get('copter_mc_samples'),
             'rover_path_length': self.rover_path_length(),
             'copter_path_length': self.copter_path_length(),
             'solve_time_s': self.meta.get('solve_time_s'),

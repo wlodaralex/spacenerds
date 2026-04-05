@@ -74,6 +74,8 @@ class State:
             lambda_=scenario.lambda_,
             rho=scenario.rho,
             tau_r=scenario.tau_r,
+            copter_top_k=scenario.copter_top_k,
+            copter_mc_samples=scenario.copter_mc_samples,
             vi_steps=scenario.vi_steps,
             max_k=scenario.max_k,
             seed=scenario.seed,
@@ -260,6 +262,7 @@ class SimulationRunner:
                 beliefs=self.state.beliefs,
                 copter_pos=self.state.copter_pos,
                 rover_pos=self.state.rover_pos,
+                rover_q=self.state.rover_q,
                 distance_budget=self.D_c,
             )
 

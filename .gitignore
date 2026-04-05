@@ -1,7 +1,29 @@
+# OS-generated files
+.DS_Store
 desktop.ini
+
+# Python bytecode and caches
 __pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-**/outputs/
+# Virtual environments
+.venv/
+venv/
+env/
 
-**/legacy/
+# Coverage outputs
+.coverage
+.coverage.*
+htmlcov/
+
+# Editor settings
+.vscode/
+.idea/
+
+# Generated project artefacts
+outputs/
+legacy/
 *.pdf

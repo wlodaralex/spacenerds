@@ -29,6 +29,8 @@ class SimulationScenario:
     rho: float = 1.0
     tau_r: float = 0.9
     D_c: float = float('inf')
+    copter_top_k: int = 5
+    copter_mc_samples: int = 3
     # Checked-in scenario files keep the epoch schedule fixed and usually omit
     # these keys, but the parser still accepts overrides for local experiments.
     T_c: int = 5
@@ -50,7 +52,13 @@ class SimulationScenario:
         if D_c is None:
             D_c = float('inf')
 
-        copter_mode = raw.get('copter_mode', 'global')
+        name = raw.get('name', '')
+        if 'copter_mode' in raw:
+            copter_mode = raw['copter_mode']
+        elif str(name).startswith('game'):
+            copter_mode = 'utility'
+        else:
+            copter_mode = 'global'
         if copter_mode not in ('local', 'global', 'utility'):
             raise ValueError(
                 f"Unsupported copter_mode={copter_mode!r}; "
@@ -58,7 +66,7 @@ class SimulationScenario:
             )
 
         return cls(
-            name         = raw.get('name', ''),
+            name         = name,
             rover_start  = tuple(raw.get('rover_start', (0, 0))),
             copter_start = tuple(raw.get('copter_start', (0, 0))),
             copter_mode  = copter_mode,
@@ -69,6 +77,8 @@ class SimulationScenario:
             rho          = raw.get('rho', 1.0),
             tau_r        = raw.get('tau_r', 0.9),
             D_c          = D_c,
+            copter_top_k = raw.get('copter_top_k', 5),
+            copter_mc_samples = raw.get('copter_mc_samples', 3),
             T_c          = raw.get('T_c', 5),
             T_r          = raw.get('T_r', 3),
             vi_steps     = raw.get('vi_steps'),

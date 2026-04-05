@@ -19,6 +19,8 @@ function
 import copy
 import math
 
+import numpy as np
+
 from scenario import SimulationScenario
 from environment import (
     GRID,
@@ -337,6 +339,7 @@ class GameRoverPlayer:
             beliefs,
             gamma = self.gamma,
             tau_r = self.tau_r,
+            use_h2 = True,
         )
         self.V, self.policy, self.n_expanded = self.planner.solution()
         print(f"  Initial D* Lite: {self.n_expanded} expanded.")
@@ -386,9 +389,17 @@ class GameCopterPlayer(CopterPlayer):
         self.alpha = scenario.alpha
         self.lambda_ = scenario.lambda_
         self.rho = scenario.rho
+        self.tau_r = scenario.tau_r
+        self.top_k = scenario.copter_top_k
+        self.mc_samples = scenario.copter_mc_samples
+        self.spatial = grid_to_graph()
+        # Keep copter-planning Monte Carlo reproducible without consuming the
+        # global numpy RNG used by the realised simulation rollout.
+        self.rng = np.random.default_rng(scenario.seed + 17)
 
     def explore(self, beliefs: dict, copter_pos: tuple,
                 rover_pos: tuple = (0, 0),
+                rover_q: int = 0,
                 distance_budget: float = float('inf')) -> tuple:
         """Run one game-theoretic copter exploration phase."""
         pos = list(copter_pos)
@@ -402,8 +413,14 @@ class GameCopterPlayer(CopterPlayer):
             alpha=self.alpha,
             lambda_=self.lambda_,
             rover_pos=rover_pos,
+            rover_q=rover_q,
             distance_budget=distance_budget,
             rho=self.rho,
+            tau_r=self.tau_r,
+            spatial=self.spatial,
+            top_k=self.top_k,
+            mc_samples=self.mc_samples,
+            rng=self.rng,
         )
         if action_sequence is None:
             return tuple(copter_pos), [], [], False
