@@ -82,10 +82,10 @@ def main():
         #     rover_pos=scenario.rover_start,
         #     rover_q=0,
         # )
-        make_convergence_plot(
-            legacy,
-            filepath = f"{prefix}_convergence.png",
-        )
+        # make_convergence_plot(
+        #     legacy,
+        #     filepath = f"{prefix}_convergence.png",
+        # )
         # make_beliefs_animation(
         #     legacy,
         #     filepath=f"{prefix}_beliefs_animation.mp4",

@@ -21,25 +21,39 @@ from matplotlib.animation import FuncAnimation, FFMpegWriter
 from environment import GRID, AP_LIST, TRUE_L
 
 # --- Shared Plot Helpers ---
-# Colour scheme for each atomic proposition
-AP_COLORS = {
-    'O': 'red',
-    'A': 'blue',
-    'B': 'limegreen',
-    'C': 'darkorchid',
-    'D': 'darkorange',
-}
+PLOT_FONT_FAMILY = 'Times New Roman'
+plt.rcParams['font.family'] = PLOT_FONT_FAMILY
 
-BASELINE_ROVER_COLOR = '#1E3765'
-BASELINE_COPTER_COLOR = '#6FC7EA'
-GAME_ROVER_COLOR = '#1E3765'
-GAME_COPTER_COLOR = '#6FC7EA'
-PATH_ALPHA = 0.5
-PATH_LINEWIDTH = 2.5
-AP_OVERLAY_FONT_SIZE = 10
-AP_OVERLAY_COMPACT_FONT_SIZE = 10
+# Colour scheme for each atomic proposition
+# AP_COLOURS = {
+#     "A": "#D2A0A0",
+#     "B": "#D4BC8A",
+#     "C": "#A8B79F",
+#     "D": "#9CAAC4",
+#     "O": "#6A6663",
+# }
+AP_COLOURS = {
+    "A": "#C97C7C",  # dusty rose
+    "B": "#C9A66B",  # muted ochre
+    "C": "#8FA889",  # sage green
+    "D": "#7E93B2",  # dusty blue
+    "O": "#4A4745",  # warm charcoal
+}
+ROVER_COLOR = '#1E3765'
+COPTER_COLOR = '#6FC7EA'
+PATH_ALPHA = 0.6
+PATH_LINEWIDTH = 3.7
+ROVER_PATH_ROW_OFFSET = 0.07
+ROVER_PATH_COL_OFFSET = -0.07
+COPTER_PATH_ROW_OFFSET = -0.07
+COPTER_PATH_COL_OFFSET = 0.07
+AP_GRID_ALPHA = 0.1
+AP_OVERLAY_ALPHA = 1.0
+AP_OVERLAY_FONT_SIZE = 18
+AP_OVERLAY_COMPACT_FONT_SIZE = 18
 AP_OVERLAY_LINESPACING = 1.5
-LEGEND_FONT_SIZE = 11
+LEGEND_FONT_SIZE = 14
+AXIS_TICK_FONT_SIZE = 14
 
 
 def _is_baseline_history(history: dict) -> bool:
@@ -49,18 +63,11 @@ def _is_baseline_history(history: dict) -> bool:
 
 def _agent_palette(history: dict) -> dict[str, str]:
     """Return the baseline or game-theoretic agent palette for one run."""
-    if _is_baseline_history(history):
-        return {
-            'rover': BASELINE_ROVER_COLOR,
-            'rover_path': BASELINE_ROVER_COLOR,
-            'copter': BASELINE_COPTER_COLOR,
-            'copter_path': BASELINE_COPTER_COLOR,
-        }
     return {
-        'rover': GAME_ROVER_COLOR,
-        'rover_path': GAME_ROVER_COLOR,
-        'copter': GAME_COPTER_COLOR,
-        'copter_path': GAME_COPTER_COLOR,
+        'rover': ROVER_COLOR,
+        'rover_path': ROVER_COLOR,
+        'copter': COPTER_COLOR,
+        'copter_path': COPTER_COLOR,
     }
 
 def _branch_aps(which_phi) -> list[str]:
@@ -160,7 +167,8 @@ def _annotate_true_labels(ax, *, fontsize: float,
                 ha='left',
                 va='top',
                 fontsize=fontsize,
-                color=color_override or AP_COLORS.get(ap, 'yellow'),
+                color=color_override or AP_COLOURS.get(ap, 'yellow'),
+                alpha=AP_OVERLAY_ALPHA,
                 fontweight='bold',
                 linespacing=AP_OVERLAY_LINESPACING,
             )
@@ -183,8 +191,8 @@ def _figure_header_layout(*, has_subtitle: bool,
         top_margin = 0.98
 
     return {
-        'title_font_size': 11,
-        'meta_font_size': 11,
+        'title_font_size': LEGEND_FONT_SIZE,
+        'meta_font_size': LEGEND_FONT_SIZE,
         'suptitle_y': suptitle_y,
         'subtitle_gap': subtitle_gap,
         'metadata_gap': metadata_gap,
@@ -202,17 +210,21 @@ def _set_figure_header(fig, *, title: str, subtitle: str | None = None,
     fig.suptitle(
         title,
         fontsize=layout['title_font_size'],
+        fontfamily=PLOT_FONT_FAMILY,
+        fontweight='bold',
         y=layout['suptitle_y'],
         va='top',
     )
     text_y = layout['suptitle_y'] - layout['subtitle_gap']
     if subtitle:
         fig.text(0.5, text_y, subtitle, ha='center', va='top',
-                 fontsize=layout['meta_font_size'])
+                 fontsize=layout['meta_font_size'],
+                 fontfamily=PLOT_FONT_FAMILY)
         text_y -= layout['metadata_gap']
     if metadata:
         fig.text(0.5, text_y, metadata, ha='center', va='top',
-                 fontsize=layout['meta_font_size'])
+                 fontsize=layout['meta_font_size'],
+                 fontfamily=PLOT_FONT_FAMILY)
     plt.tight_layout(rect=(0, 0, 1, layout['top_margin']))
 
 
@@ -223,8 +235,8 @@ def _set_square_grid_axes(ax) -> None:
 
 def plot_belief_map(ax, beliefs: dict, ap: str,
                     rover_pos=None, copter_pos=None,
-                    rover_color=BASELINE_ROVER_COLOR,
-                    copter_color=BASELINE_COPTER_COLOR) -> None:
+                    rover_color=ROVER_COLOR,
+                    copter_color=COPTER_COLOR) -> None:
     """Plot one belief heatmap for one atomic proposition."""
     grid = np.array([[beliefs[(r, c)][ap] for c in range(GRID)]
                      for r in range(GRID)])
@@ -242,10 +254,10 @@ def plot_belief_map(ax, beliefs: dict, ap: str,
                 markersize=9, markeredgecolor='white', markeredgewidth=1.2)
 
     _set_square_grid_axes(ax)
-    ax.set_title(f'Belief: {ap}', fontsize=14)
+    ax.set_title(f'Belief: {ap}', fontsize=LEGEND_FONT_SIZE)
     ax.set_xticks(range(0, GRID, 2))
     ax.set_yticks(range(0, GRID, 2))
-    ax.tick_params(labelsize=6)
+    ax.tick_params(labelsize=AXIS_TICK_FONT_SIZE)
 
 
 # --- Static Plots ---
@@ -310,11 +322,11 @@ def make_trajectories_plot(history: dict, filepath: str,
         ax.axvline(i - 0.5, color='#ddd', lw=0.6)
     for (r, c), labels in TRUE_L.items():
         for ap in labels:
-            color = AP_COLORS.get(ap)
+            color = AP_COLOURS.get(ap)
             if color:
                 ax.add_patch(mpatches.Rectangle(
                     (c - 0.5, r - 0.5), 1, 1,
-                    facecolor=color, alpha=0.07, edgecolor='none'))
+                    facecolor=color, alpha=AP_GRID_ALPHA, edgecolor='none'))
     _annotate_true_labels(ax, fontsize=AP_OVERLAY_FONT_SIZE)
 
     if use_substeps and 'rover_substeps' in history:
@@ -324,17 +336,22 @@ def make_trajectories_plot(history: dict, filepath: str,
         rpath = np.array(history['rover_path'])
         cpath = np.array(history['copter_path'])
 
-    ax.plot(rpath[:, 1], rpath[:, 0], '-', color=palette['rover_path'],
+    rpath_rows = rpath[:, 0] + ROVER_PATH_ROW_OFFSET
+    rpath_cols = rpath[:, 1] + ROVER_PATH_COL_OFFSET
+    cpath_rows = cpath[:, 0] + COPTER_PATH_ROW_OFFSET
+    cpath_cols = cpath[:, 1] + COPTER_PATH_COL_OFFSET
+
+    ax.plot(rpath_cols, rpath_rows, '-', color=palette['rover_path'],
             lw=PATH_LINEWIDTH, alpha=PATH_ALPHA, label='Rover path')
-    ax.plot(cpath[:, 1], cpath[:, 0], '-', color=palette['copter_path'],
+    ax.plot(cpath_cols, cpath_rows, '-', color=palette['copter_path'],
             lw=PATH_LINEWIDTH, alpha=PATH_ALPHA, label='Copter path')
-    ax.plot(rpath[0, 1], rpath[0, 0], 'o', color=palette['rover'],
+    ax.plot(rpath_cols[0], rpath_rows[0], 'o', color=palette['rover'],
             markersize=6)
-    ax.plot(cpath[0, 1], cpath[0, 0], 'o', color=palette['copter'],
+    ax.plot(cpath_cols[0], cpath_rows[0], 'o', color=palette['copter'],
             markersize=6)
-    ax.plot(rpath[-1, 1], rpath[-1, 0], 'x', color=palette['rover_path'],
+    ax.plot(rpath_cols[-1], rpath_rows[-1], 'x', color=palette['rover_path'],
             markersize=10, markeredgewidth=2.0)
-    ax.plot(cpath[-1, 1], cpath[-1, 0], 'x', color=palette['copter_path'],
+    ax.plot(cpath_cols[-1], cpath_rows[-1], 'x', color=palette['copter_path'],
             markersize=10, markeredgewidth=2.0)
 
     status = _run_status(history)
@@ -352,6 +369,7 @@ def make_trajectories_plot(history: dict, filepath: str,
     ax.set_ylim(GRID - 0.5, -0.5)
     ax.set_xticks(range(GRID))
     ax.set_yticks(range(GRID))
+    ax.tick_params(labelsize=AXIS_TICK_FONT_SIZE)
     ax.legend(fontsize=LEGEND_FONT_SIZE, loc='upper right')
     fig.savefig(filepath, dpi=150, bbox_inches='tight')
     plt.close(fig)
@@ -405,7 +423,7 @@ def make_v_fxn_heatmap(beliefs: dict, filepath: str, rover_pos: tuple,
         color_override='white',
     )
     ax.plot(rover_pos[1], rover_pos[0], 'r*', markersize=14, label='Rover')
-    ax.set_title(f'Value Function V(·, q={rover_q})', fontsize=14)
+    ax.set_title(f'Value Function V(·, q={rover_q})', fontsize=LEGEND_FONT_SIZE)
     _set_square_grid_axes(ax)
     ax.legend(fontsize=LEGEND_FONT_SIZE, loc='upper right')
     plt.tight_layout()
@@ -458,7 +476,8 @@ def make_convergence_plot(history: dict, filepath: str,
     ax_obs.set_ylim(-0.05, 1.05)
     ax_obs.set_xlabel('time step k', fontsize=10)
     ax_obs.set_ylabel('B(x |= O)', fontsize=10)
-    ax_obs.set_title('obstacle cells: B(x|=O) -> 1', fontsize=14, fontweight='bold')
+    ax_obs.set_title('obstacle cells: B(x|=O) -> 1',
+                     fontsize=LEGEND_FONT_SIZE, fontweight='bold')
     ax_obs.grid(alpha=0.25)
     ax_obs.legend(fontsize=LEGEND_FONT_SIZE, loc='upper right')
 
@@ -470,7 +489,8 @@ def make_convergence_plot(history: dict, filepath: str,
     ax_free.set_ylim(-0.05, 1.05)
     ax_free.set_xlabel('time step k', fontsize=10)
     ax_free.set_ylabel('B(x |= O)', fontsize=10)
-    ax_free.set_title('free cells: B(x|=O) -> 0', fontsize=14, fontweight='bold')
+    ax_free.set_title('free cells: B(x|=O) -> 0',
+                      fontsize=LEGEND_FONT_SIZE, fontweight='bold')
     ax_free.grid(alpha=0.25)
     ax_free.legend(fontsize=LEGEND_FONT_SIZE, loc='upper right')
 
@@ -555,6 +575,7 @@ def make_beliefs_animation(history: dict, filepath: str,
     header_title = fig.suptitle(
         '',
         fontsize=header_layout['title_font_size'],
+        fontfamily=PLOT_FONT_FAMILY,
         fontweight='bold',
         y=header_layout['suptitle_y'],
         va='top',
@@ -564,7 +585,8 @@ def make_beliefs_animation(history: dict, filepath: str,
                  header_layout['suptitle_y'] - header_layout['subtitle_gap'],
                  metadata,
                  ha='center', va='top',
-                 fontsize=header_layout['meta_font_size'])
+                 fontsize=header_layout['meta_font_size'],
+                 fontfamily=PLOT_FONT_FAMILY)
 
     def draw_frame(i):
         for ax, ap in zip(axes, APs):
@@ -586,7 +608,9 @@ def make_beliefs_animation(history: dict, filepath: str,
                 trail = rover_path[:i + 1]
                 if len(trail) > 1:
                     tr = np.array(trail)
-                    ax.plot(tr[:, 1], tr[:, 0], '-', color=palette['rover_path'],
+                    ax.plot(tr[:, 1] + ROVER_PATH_COL_OFFSET,
+                            tr[:, 0] + ROVER_PATH_ROW_OFFSET, '-',
+                            color=palette['rover_path'],
                             lw=PATH_LINEWIDTH, alpha=0.5)
             if ap == 'O':
                 ax.plot(cp[1], cp[0], 'o', color=palette['copter'],
@@ -594,13 +618,15 @@ def make_beliefs_animation(history: dict, filepath: str,
                 trail = copter_path[:i + 1]
                 if len(trail) > 1:
                     tr = np.array(trail)
-                    ax.plot(tr[:, 1], tr[:, 0], '-', color=palette['copter_path'],
+                    ax.plot(tr[:, 1] + COPTER_PATH_COL_OFFSET,
+                            tr[:, 0] + COPTER_PATH_ROW_OFFSET, '-',
+                            color=palette['copter_path'],
                             lw=PATH_LINEWIDTH, alpha=0.5)
             _set_square_grid_axes(ax)
-            ax.set_title(f'Belief: {ap}', fontsize=14)
+            ax.set_title(f'Belief: {ap}', fontsize=LEGEND_FONT_SIZE)
             ax.set_xticks(range(0, GRID, 2))
             ax.set_yticks(range(0, GRID, 2))
-            ax.tick_params(labelsize=6)
+            ax.tick_params(labelsize=AXIS_TICK_FONT_SIZE)
 
         phase  = phase_list[min(i, len(phase_list) - 1)] if phase_list else '?'
         pstr   = {'C': 'Copter exploring', 'R': 'Rover executing',
@@ -667,6 +693,7 @@ def make_unified_animation(history: dict, filepath: str,
     ax.set_ylim(GRID - 0.5, -0.5)
     ax.set_xticks(range(GRID))
     ax.set_yticks(range(GRID))
+    ax.tick_params(labelsize=AXIS_TICK_FONT_SIZE)
 
     im_obs = ax.imshow(
         np.full((GRID, GRID), 0.5), vmin=0, vmax=1,
@@ -690,7 +717,7 @@ def make_unified_animation(history: dict, filepath: str,
         (r, c, ap): ax.text(
             c - 0.46, r - 0.43, '', ha='left', va='top',
             fontsize=AP_OVERLAY_COMPACT_FONT_SIZE,
-            color=AP_COLORS.get(ap, 'gray'), fontweight='bold',
+            color=AP_COLOURS.get(ap, 'gray'), fontweight='bold',
             alpha=0.0, zorder=7, linespacing=AP_OVERLAY_LINESPACING)
         for r in range(GRID)
         for c in range(GRID)
@@ -716,6 +743,7 @@ def make_unified_animation(history: dict, filepath: str,
             f'[{initial_pstr}]   q={get_q_for_frame(0)}',
         ),
         fontsize=header_layout['title_font_size'],
+        fontfamily=PLOT_FONT_FAMILY,
         fontweight='bold',
         y=header_layout['suptitle_y'],
         va='top',
@@ -728,6 +756,7 @@ def make_unified_animation(history: dict, filepath: str,
             ha='center',
             va='top',
             fontsize=header_layout['meta_font_size'],
+            fontfamily=PLOT_FONT_FAMILY,
         )
     ax.legend(handles=[
         mpatches.Patch(color=palette['rover'], label='Rover'),
@@ -769,11 +798,17 @@ def make_unified_animation(history: dict, filepath: str,
         ci = min(i, len(copter_path) - 1)
         if ri > 0:
             tr = np.array(rover_path[:ri + 1])
-            rover_trail.set_data(tr[:, 1], tr[:, 0])
+            rover_trail.set_data(
+                tr[:, 1] + ROVER_PATH_COL_OFFSET,
+                tr[:, 0] + ROVER_PATH_ROW_OFFSET,
+            )
         rover_dot.set_data([rover_path[ri][1]], [rover_path[ri][0]])
         if ci > 0:
             tc = np.array(copter_path[:ci + 1])
-            copter_trail.set_data(tc[:, 1], tc[:, 0])
+            copter_trail.set_data(
+                tc[:, 1] + COPTER_PATH_COL_OFFSET,
+                tc[:, 0] + COPTER_PATH_ROW_OFFSET,
+            )
         copter_dot.set_data([copter_path[ci][1]], [copter_path[ci][0]])
 
         phase = phase_list[min(i, len(phase_list) - 1)] if phase_list else '?'
