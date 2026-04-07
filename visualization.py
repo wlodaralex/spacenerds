@@ -83,8 +83,8 @@ def _run_status(history: dict, *, obstacle_detail: bool = False) -> str:
     return "Timeout"
 
 
-def _distance_budget_delta(history: dict) -> float | None:
-    """Return consumed copter distance budget over the run when finite."""
+def _distance_budget_left(history: dict) -> float | None:
+    """Return remaining copter distance budget at the end when finite."""
     D_c_budget = history.get('D_c_budget')
     if D_c_budget is None:
         return None
@@ -102,14 +102,14 @@ def _distance_budget_delta(history: dict) -> float | None:
     D_c_final = float(D_c_final)
     if not np.isfinite(D_c_final):
         return None
-    return D_c_budget - D_c_final
+    return D_c_final
 
 
 def _format_run_metadata(history: dict) -> str:
     """Build one compact metadata string for figure titles."""
     gamma = history.get('gamma')
     lambda_ = history.get('lambda_', history.get('lambda'))
-    delta_D_c = _distance_budget_delta(history)
+    D_c_left = _distance_budget_left(history)
     rover_path_length = history.get('rover_path_length')
     copter_path_length = history.get('copter_path_length')
     solve_time_s = history.get('solve_time_s')
@@ -119,8 +119,8 @@ def _format_run_metadata(history: dict) -> str:
         fields.append(f'γ={gamma:g}')
     if lambda_ is not None:
         fields.append(f'λ={lambda_:g}')
-    if delta_D_c is not None:
-        fields.append(f'ΔD_c={delta_D_c:.2f}')
+    if D_c_left is not None:
+        fields.append(f'D_c left={D_c_left:.2f}')
     if rover_path_length is not None:
         fields.append(f'L_r={rover_path_length:.2f}')
     if copter_path_length is not None:

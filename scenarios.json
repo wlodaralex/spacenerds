@@ -9,7 +9,7 @@
     "lambda_": 0.0,
     "rho": 1.0,
     "tau_r": 0.9,
-    "D_c": 15.0,
+    "D_c": 18.0,
     "vi_steps": 80,
     "max_k": 600,
     "seed": 1024
@@ -24,7 +24,7 @@
     "lambda_": 1.0,
     "rho": 1.0,
     "tau_r": 0.9,
-    "D_c": 15.0,
+    "D_c": 18.0,
     "vi_steps": 80,
     "max_k": 600,
     "seed": 1024
@@ -39,7 +39,7 @@
     "lambda_": 1.0,
     "rho": 1.0,
     "tau_r": 0.9,
-    "D_c": 15.0,
+    "D_c": 18.0,
     "vi_steps": 80,
     "max_k": 600,
     "seed": 1024
@@ -54,7 +54,22 @@
     "lambda_": 0.0,
     "rho": 1.0,
     "tau_r": 0.9,
-    "D_c": 15.0,
+    "D_c": 18.0,
+    "vi_steps": 80,
+    "max_k": 600,
+    "seed": 1024
+  },
+  {
+    "name": "baseline_local",
+    "rover_start": [0, 0],
+    "copter_start": [0, 0],
+    "copter_mode": "local",
+    "alpha": 1.5,
+    "gamma": 0.0,
+    "lambda_": 0.0,
+    "rho": 1.0,
+    "tau_r": 0.9,
+    "D_c": null,
     "vi_steps": 80,
     "max_k": 600,
     "seed": 1024
