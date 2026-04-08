@@ -756,14 +756,19 @@ class DStarLitePlanner:
         risk_penalty_by_cell = {}
         for r in range(GRID):
             for c in range(GRID):
-                # Step 1: precompute the destination-cell survival toll.
-                obstacle_belief = max(
+                # Step 1: prune destinations using post-copter feasibility B_t^+.
+                feasibility_obstacle_belief = max(
                     1e-9,
-                    min(1.0 - 1e-9, self._risk_beliefs[(r, c)]['O']),
+                    min(1.0 - 1e-9, self._mission_beliefs[(r, c)]['O']),
                 )
-                if obstacle_belief > self.tau_r:
+                if feasibility_obstacle_belief > self.tau_r:
                     risk_penalty_by_cell[(r, c)] = None
                 else:
+                    # Step 2: keep the conservative risk toll from pre-copter B_t.
+                    obstacle_belief = max(
+                        1e-9,
+                        min(1.0 - 1e-9, self._risk_beliefs[(r, c)]['O']),
+                    )
                     risk_penalty_by_cell[(r, c)] = (
                         self.gamma * (-math.log(1.0 - obstacle_belief))
                     )
@@ -771,7 +776,7 @@ class DStarLitePlanner:
         transition_cost_by_cell_and_q = {}
         for r in range(GRID):
             for c in range(GRID):
-                # Step 2: precompute the destination-cell mission logcosts.
+                # Step 3: precompute the destination-cell mission logcosts.
                 cell_beliefs = self._mission_beliefs[(r, c)]
                 for q in self._active_q:
                     transition_cost_by_cell_and_q[(r, c, q)] = tuple(
@@ -787,7 +792,7 @@ class DStarLitePlanner:
         for r in range(GRID):
             for c in range(GRID):
                 for q in self._active_q:
-                    # Step 3: stitch mission logcost and risk toll into each edge.
+                    # Step 4: stitch mission logcost and risk toll into each edge.
                     state_successors = []
                     for (nr, nc), action_index in self.spatial[(r, c)]:
                         risk_penalty = risk_penalty_by_cell[(nr, nc)]

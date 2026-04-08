@@ -22,7 +22,14 @@ from environment import GRID, AP_LIST, TRUE_L
 
 # --- Shared Plot Helpers ---
 PLOT_FONT_FAMILY = 'Times New Roman'
-plt.rcParams['font.family'] = PLOT_FONT_FAMILY
+plt.rcParams.update({
+    'font.family': PLOT_FONT_FAMILY,
+    'font.serif': [PLOT_FONT_FAMILY],
+    'mathtext.fontset': 'custom',
+    'mathtext.rm': PLOT_FONT_FAMILY,
+    'mathtext.it': f'{PLOT_FONT_FAMILY}:italic',
+    'mathtext.bf': f'{PLOT_FONT_FAMILY}:bold',
+})
 
 # Colour scheme for each atomic proposition
 # AP_COLOURS = {
@@ -90,50 +97,43 @@ def _run_status(history: dict, *, obstacle_detail: bool = False) -> str:
     return "Timeout"
 
 
-def _distance_budget_left(history: dict) -> float | None:
-    """Return remaining copter distance budget at the end when finite."""
-    D_c_budget = history.get('D_c_budget')
-    if D_c_budget is None:
+def _format_math_float(value, *, decimals: int | None = None) -> str | None:
+    """Format one value for compact mathtext metadata."""
+    if value is None:
         return None
-    D_c_budget = float(D_c_budget)
-    if not np.isfinite(D_c_budget):
-        return None
-
-    D_c_history = history.get('D_c')
-    if not D_c_history:
-        return None
-
-    D_c_final = D_c_history[-1]
-    if D_c_final is None:
-        return None
-    D_c_final = float(D_c_final)
-    if not np.isfinite(D_c_final):
-        return None
-    return D_c_final
+    value = float(value)
+    if np.isinf(value):
+        return r'\infty'
+    if decimals is not None:
+        return f'{value:.{decimals}f}'
+    return f'{value:g}'
 
 
 def _format_run_metadata(history: dict) -> str:
     """Build one compact metadata string for figure titles."""
     gamma = history.get('gamma')
     lambda_ = history.get('lambda_', history.get('lambda'))
-    D_c_left = _distance_budget_left(history)
+    tau_r = history.get('tau_r')
+    D_c_budget = history.get('D_c_budget')
     rover_path_length = history.get('rover_path_length')
     copter_path_length = history.get('copter_path_length')
     solve_time_s = history.get('solve_time_s')
 
     fields = []
     if gamma is not None:
-        fields.append(f'γ={gamma:g}')
+        fields.append(rf'$\gamma={_format_math_float(gamma)}$')
     if lambda_ is not None:
-        fields.append(f'λ={lambda_:g}')
-    if D_c_left is not None:
-        fields.append(f'D_c left={D_c_left:.2f}')
+        fields.append(rf'$\lambda={_format_math_float(lambda_)}$')
+    if D_c_budget is not None:
+        fields.append(rf'$D_c={_format_math_float(D_c_budget)}$')
+    if tau_r is not None:
+        fields.append(rf'$\tau_r={_format_math_float(tau_r)}$')
     if rover_path_length is not None:
-        fields.append(f'L_r={rover_path_length:.2f}')
+        fields.append(rf'$L_r={_format_math_float(rover_path_length, decimals=2)}$')
     if copter_path_length is not None:
-        fields.append(f'L_c={copter_path_length:.2f}')
+        fields.append(rf'$L_c={_format_math_float(copter_path_length, decimals=2)}$')
     if solve_time_s is not None:
-        fields.append(f'solve={solve_time_s:.2f}s')
+        fields.append(rf'$\mathrm{{solve}}={_format_math_float(solve_time_s, decimals=2)}s$')
     return '  |  '.join(fields)
 
 

@@ -140,6 +140,7 @@ class SimHistory:
         lambda_ = self.params.get('lambda_')
         copter_mode = self.params.get('copter_mode')
         rho = self.params.get('rho')
+        tau_r = self.params.get('tau_r')
         D_c_budget = self.params.get('D_c_budget')
         copter_top_k = self.params.get('copter_top_k')
         copter_mc_samples = self.params.get('copter_mc_samples')
@@ -158,6 +159,7 @@ class SimHistory:
                 'gamma': gamma,
                 'lambda': lambda_,
                 'rho': rho,
+                'tau_r': tau_r,
                 'D_c_budget': D_c_budget,
                 'copter_top_k': copter_top_k,
                 'copter_mc_samples': copter_mc_samples,
@@ -214,6 +216,7 @@ class SimHistory:
             'lambda': self.params.get('lambda_'),
             'lambda_': self.params.get('lambda_'),
             'rho': self.params.get('rho'),
+            'tau_r': self.params.get('tau_r'),
             'D_c_budget': self.params.get('D_c_budget'),
             'copter_top_k': self.params.get('copter_top_k'),
             'copter_mc_samples': self.params.get('copter_mc_samples'),

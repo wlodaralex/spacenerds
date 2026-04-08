@@ -16,8 +16,8 @@ from environment import GRID
 
 
 # --- Sensor Model ---
-TARGET_PRIOR = 0.1
-OBSTACLE_PRIOR = 0.3
+TARGET_PRIOR = 0.5
+OBSTACLE_PRIOR = 0.5
 BAYES_DENOMINATOR_EPS = 1e-12
 
 
