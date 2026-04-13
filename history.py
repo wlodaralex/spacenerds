@@ -210,6 +210,7 @@ class SimHistory:
             'scenario_name': self.meta.get('scenario_name',
                                            self.params.get('scenario_name', '')),
             'copter_mode': self.params.get('copter_mode'),
+            'seed': self.params.get('seed'),
             'gamma': self.params.get('gamma'),
             # Keep both spellings while visualization and legacy CSV consumers
             # migrate to the explicit ``lambda_`` field name.

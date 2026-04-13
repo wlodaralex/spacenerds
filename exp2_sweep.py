@@ -50,6 +50,13 @@ PHASE3 = dict(
     d_cs    = [15, 30],
 )
 
+HEATMAP_BACKFILL = dict(
+    gammas  = sorted(set(PHASE1['gammas']) | set(PHASE3['gammas'])),
+    lambdas = sorted(set(PHASE1['lambdas']) | set(PHASE3['lambdas'])),
+    tau_r   = 0.5,
+    D_c     = 30.0,
+)
+
 # ─── Run settings ─────────────────────────────────────────────
 N_SEEDS    = 30
 MAX_K      = 300       
@@ -63,7 +70,8 @@ FIXED = dict(
 )
 
 # ─── Output ───────────────────────────────────────────────────
-CSV_PATH = ROOT / 'outputs' / 'exp2_sweep.csv'
+DEFAULT_CSV_PATH = ROOT / 'data' / 'exp2_sweep.csv'
+CSV_PATH = DEFAULT_CSV_PATH
 
 FIELDS = [
     'gamma', 'lambda', 'tau_r', 'D_c', 'seed',
@@ -202,6 +210,52 @@ def _build_done_set(rows):
     return done
 
 
+def _slice_matches(row, tau_r, D_c):
+    """Return whether one CSV row belongs to the requested heatmap slice."""
+    row_tau = float(row['tau_r'])
+    row_d_c = float('inf') if row['D_c'] == 'inf' else float(row['D_c'])
+    return row_tau == float(tau_r) and row_d_c == float(D_c)
+
+
+def _generate_heatmap_backfill_jobs(rows, n_seeds):
+    """Backfill the gamma-lambda heatmap slice used in analysis plots."""
+    seeds = [META_SEED + i + 1 for i in range(n_seeds)]
+    tau_r = HEATMAP_BACKFILL['tau_r']
+    D_c = HEATMAP_BACKFILL['D_c']
+
+    desired_pairs = {
+        (float(gamma), float(lambda_))
+        for gamma in HEATMAP_BACKFILL['gammas']
+        for lambda_ in HEATMAP_BACKFILL['lambdas']
+    }
+    observed_pairs = {
+        (float(row['gamma']), float(row['lambda']))
+        for row in rows
+        if _slice_matches(row, tau_r, D_c)
+    }
+    missing_pairs = sorted(desired_pairs - observed_pairs)
+
+    print(
+        f"\nHeatmap backfill target: τ_r={tau_r}, D_c={D_c:.0f}  "
+        f"grid={len(HEATMAP_BACKFILL['gammas'])}×{len(HEATMAP_BACKFILL['lambdas'])}"
+    )
+    if missing_pairs:
+        print(f"  Missing gamma-lambda cells: {len(missing_pairs)}")
+        print(
+            "  "
+            + ", ".join(f"(γ={gamma:.0f}, λ={lambda_:.0f})"
+                        for gamma, lambda_ in missing_pairs)
+        )
+    else:
+        print("  No missing gamma-lambda cells.")
+
+    jobs = []
+    for gamma, lambda_ in missing_pairs:
+        for seed in seeds:
+            jobs.append((gamma, lambda_, tau_r, D_c, seed))
+    return jobs
+
+
 # ─── Job runner ───────────────────────────────────────────────
 
 def _run_phase(phase_name, jobs_all, existing, done, n_workers):
@@ -312,14 +366,25 @@ def _generate_phase2_jobs(top_configs, n_seeds):
 # ─── Main ────────────────────────────────────────────────────
 
 def main():
+    global CSV_PATH
     p = argparse.ArgumentParser()
     p.add_argument('-j', '--workers', type=int, default=N_WORKERS)
     p.add_argument('--phase', type=int, choices=[1, 2, 3], default=None,
                    help='Run only one phase (default: all)')
+    p.add_argument('--backfill-heatmap', action='store_true',
+                   help='Backfill missing (gamma, lambda) cells for the tau_r=0.5, D_c=30 heatmap')
+    p.add_argument('--csv-path', type=Path, default=DEFAULT_CSV_PATH,
+                   help='CSV file to read/write (default: ./data/exp2_sweep.csv)')
     p.add_argument('--dry-run', action='store_true')
     args = p.parse_args()
+    CSV_PATH = args.csv_path
 
-    phases = [args.phase] if args.phase else [1, 2, 3]
+    if args.phase is not None:
+        phases = [args.phase]
+    elif args.backfill_heatmap:
+        phases = []
+    else:
+        phases = [1, 2, 3]
     seeds = [META_SEED + i + 1 for i in range(N_SEEDS)]
 
     existing = _load_csv()
@@ -368,6 +433,13 @@ def main():
 
         if not args.dry_run:
             existing, done = _run_phase("Phase 3: Fine-tune", jobs,
+                                        existing, done, args.workers)
+
+    # ── Optional targeted backfill for the analysis heatmap ──
+    if args.backfill_heatmap:
+        jobs = _generate_heatmap_backfill_jobs(existing, N_SEEDS)
+        if not args.dry_run:
+            existing, done = _run_phase("Heatmap Backfill", jobs,
                                         existing, done, args.workers)
 
     elapsed = time.perf_counter() - t_total

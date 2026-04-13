@@ -232,7 +232,7 @@ def main():
     print(f"CSV: {CSV_PATH} ({len(completed)} rows)")
 
     # Print summary table
-    print(f"\n{'Config':<20} {'Comp%':>6} {'Fail%':>6} {'TO%':>6} {'Med k':>6}")
+    print(f"\n{'Config':<20} {'Comp%':>6} {'Fail%':>6} {'Timeout%':>9} {'Med k':>6}")
     print("-" * 50)
     for name, _, _, _ in CONFIGS:
         rows = [r for r in completed if r['config'] == name]
@@ -243,7 +243,7 @@ def main():
         ks = [int(r['k_final']) for r in rows if str(r['complete']) == 'True']
         mk = sorted(ks)[len(ks)//2] if ks else -1
         print(f"{name:<20} {nc/n*100:5.0f}% {nf/n*100:5.0f}% "
-              f"{nt/n*100:5.0f}% {mk:>6d}")
+              f"{nt/n*100:8.0f}% {mk:>6d}")
 
 
 if __name__ == '__main__':

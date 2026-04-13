@@ -49,18 +49,25 @@ AP_COLOURS = {
 ROVER_COLOR = '#1E3765'
 COPTER_COLOR = '#6FC7EA'
 PATH_ALPHA = 0.6
-PATH_LINEWIDTH = 3.7
+PATH_LINEWIDTH = 4.7
 ROVER_PATH_ROW_OFFSET = 0.07
 ROVER_PATH_COL_OFFSET = -0.07
 COPTER_PATH_ROW_OFFSET = -0.07
 COPTER_PATH_COL_OFFSET = 0.07
-AP_GRID_ALPHA = 0.1
+AP_GRID_ALPHA = 0.15
 AP_OVERLAY_ALPHA = 1.0
-AP_OVERLAY_FONT_SIZE = 18
-AP_OVERLAY_COMPACT_FONT_SIZE = 18
+AP_OVERLAY_FONT_SIZE = 26
+AP_OVERLAY_COMPACT_FONT_SIZE = 26
 AP_OVERLAY_LINESPACING = 1.5
-LEGEND_FONT_SIZE = 14
-AXIS_TICK_FONT_SIZE = 14
+LEGEND_FONT_SIZE = 18
+TRAJECTORY_LEGEND_FONT_SIZE = 12
+AXIS_TICK_FONT_SIZE = 20
+ANIMATION_HEADER_FONT_SIZE = 14
+ANIMATION_META_FONT_SIZE = 14
+ANIMATION_LEGEND_FONT_SIZE = LEGEND_FONT_SIZE
+ANIMATION_TICK_FONT_SIZE = AXIS_TICK_FONT_SIZE
+ANIMATION_AP_FONT_SIZE = AP_OVERLAY_COMPACT_FONT_SIZE
+ANIMATION_V_FONT_SIZE = 4.5
 
 
 def _is_baseline_history(history: dict) -> bool:
@@ -109,25 +116,16 @@ def _format_math_float(value, *, decimals: int | None = None) -> str | None:
     return f'{value:g}'
 
 
-def _format_run_metadata(history: dict) -> str:
+def _format_run_metadata(history: dict, *, include_seed: bool = True) -> str:
     """Build one compact metadata string for figure titles."""
-    gamma = history.get('gamma')
-    lambda_ = history.get('lambda_', history.get('lambda'))
-    tau_r = history.get('tau_r')
-    D_c_budget = history.get('D_c_budget')
+    seed = history.get('seed')
     rover_path_length = history.get('rover_path_length')
     copter_path_length = history.get('copter_path_length')
     solve_time_s = history.get('solve_time_s')
 
     fields = []
-    if gamma is not None:
-        fields.append(rf'$\gamma={_format_math_float(gamma)}$')
-    if lambda_ is not None:
-        fields.append(rf'$\lambda={_format_math_float(lambda_)}$')
-    if D_c_budget is not None:
-        fields.append(rf'$D_c={_format_math_float(D_c_budget)}$')
-    if tau_r is not None:
-        fields.append(rf'$\tau_r={_format_math_float(tau_r)}$')
+    if include_seed and seed is not None:
+        fields.append(rf'$\mathrm{{seed}}={int(float(seed))}$')
     if rover_path_length is not None:
         fields.append(rf'$L_r={_format_math_float(rover_path_length, decimals=2)}$')
     if copter_path_length is not None:
@@ -143,11 +141,50 @@ def _epoch_span(history: dict) -> int:
 
 
 def _title_with_scenario(history: dict, title: str) -> str:
-    """Prefix one figure title with the scenario name when available."""
+    """Prefix one figure title with scenario name."""
     name = str(history.get('scenario_name', '')).strip()
-    if not name:
-        return title
-    return f'[{name}]  {title}'
+    return f'[{name}]  {title}' if name else title
+
+
+def _agent_legend_labels(history: dict) -> tuple[str, str]:
+    """Return rover/copter legend labels with relevant parameters when present."""
+    if _is_baseline_history(history):
+        return 'Rover', 'Copter'
+
+    rover_parts = []
+    copter_parts = []
+
+    gamma = history.get('gamma')
+    if gamma is not None:
+        rover_parts.append(rf'\gamma={_format_math_float(gamma)}')
+
+    tau_r = history.get('tau_r')
+    if tau_r is not None:
+        rover_parts.append(rf'\tau_r={_format_math_float(tau_r)}')
+
+    lambda_ = history.get('lambda_', history.get('lambda'))
+    if lambda_ is not None:
+        copter_parts.append(rf'\lambda={_format_math_float(lambda_)}')
+
+    D_c_budget = history.get('D_c_budget', history.get('D_c'))
+    if D_c_budget is not None:
+        copter_parts.append(rf'D_c={_format_math_float(D_c_budget)}')
+
+    rover_label = 'Rover'
+    if rover_parts:
+        rover_label = rf"Rover (${' , '.join(rover_parts)}$)"
+
+    copter_label = 'Copter'
+    if copter_parts:
+        copter_label = rf"Copter (${' , '.join(copter_parts)}$)"
+
+    return rover_label, copter_label
+
+
+def _animation_title(history: dict, *, phase_text: str, q_value: int) -> str:
+    """Build one unified-animation title with phase and status."""
+    title = f'[{phase_text}]   q={q_value}  —  {_run_status(history)}'
+    return _title_with_scenario(history, title)
 
 
 def _ap_overlay_text(ap: str) -> str:
@@ -233,10 +270,48 @@ def _set_square_grid_axes(ax) -> None:
     ax.set_aspect('equal', adjustable='box')
 
 
+def _set_grid_ticks(ax, tick_values, *, show_ticks: bool) -> None:
+    """Show or hide one grid-world axes tick set."""
+    if show_ticks:
+        ax.set_xticks(tick_values)
+        ax.set_yticks(tick_values)
+        ax.tick_params(labelsize=AXIS_TICK_FONT_SIZE)
+        return
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.tick_params(
+        bottom=False,
+        left=False,
+        labelbottom=False,
+        labelleft=False,
+    )
+
+
+def _draw_trajectory_base(ax, *, show_ticks: bool, annotate_labels: bool = True) -> None:
+    """Draw the static map background shared by trajectory images and videos."""
+    for i in range(GRID + 1):
+        ax.axhline(i - 0.5, color='#ddd', lw=0.6)
+        ax.axvline(i - 0.5, color='#ddd', lw=0.6)
+    for (r, c), labels in TRUE_L.items():
+        for ap in labels:
+            color = AP_COLOURS.get(ap)
+            if color:
+                ax.add_patch(mpatches.Rectangle(
+                    (c - 0.5, r - 0.5), 1, 1,
+                    facecolor=color, alpha=AP_GRID_ALPHA, edgecolor='none'))
+    if annotate_labels:
+        _annotate_true_labels(ax, fontsize=AP_OVERLAY_FONT_SIZE)
+    _set_square_grid_axes(ax)
+    ax.set_xlim(-0.5, GRID - 0.5)
+    ax.set_ylim(GRID - 0.5, -0.5)
+    _set_grid_ticks(ax, range(GRID), show_ticks=show_ticks)
+
+
 def plot_belief_map(ax, beliefs: dict, ap: str,
                     rover_pos=None, copter_pos=None,
                     rover_color=ROVER_COLOR,
-                    copter_color=COPTER_COLOR) -> None:
+                    copter_color=COPTER_COLOR,
+                    show_ticks: bool = True) -> None:
     """Plot one belief heatmap for one atomic proposition."""
     grid = np.array([[beliefs[(r, c)][ap] for c in range(GRID)]
                      for r in range(GRID)])
@@ -255,13 +330,13 @@ def plot_belief_map(ax, beliefs: dict, ap: str,
 
     _set_square_grid_axes(ax)
     ax.set_title(f'Belief: {ap}', fontsize=LEGEND_FONT_SIZE)
-    ax.set_xticks(range(0, GRID, 2))
-    ax.set_yticks(range(0, GRID, 2))
-    ax.tick_params(labelsize=AXIS_TICK_FONT_SIZE)
+    _set_grid_ticks(ax, range(0, GRID, 2), show_ticks=show_ticks)
 
 
 # --- Static Plots ---
-def make_belief_snapshots_plot(history: dict, filepath: str) -> None:
+def make_belief_snapshots_plot(history: dict, filepath: str,
+                               show_ticks: bool = True,
+                               show_header: bool = True) -> None:
     """Plot the sparse belief snapshots saved during one run."""
     which = history.get('which_phi', '')
     palette = _agent_palette(history)
@@ -288,7 +363,8 @@ def make_belief_snapshots_plot(history: dict, filepath: str) -> None:
                             rover_pos  = rp if ap != 'O' else None,
                             copter_pos = cp if ap == 'O' else None,
                             rover_color=palette['rover'],
-                            copter_color=palette['copter'])
+                            copter_color=palette['copter'],
+                            show_ticks=show_ticks)
 
     status = _run_status(history, obstacle_detail=True)
     metadata = _format_run_metadata(history)
@@ -297,37 +373,32 @@ def make_belief_snapshots_plot(history: dict, filepath: str) -> None:
         if _is_baseline_history(history)
         else '(● = rover  |  ● = copter  |  dark = high belief)'
     )
-    _set_figure_header(
-        fig,
-        title=_title_with_scenario(
-            history,
-            f'Environmental Belief Snapshots  —  {status}',
-        ),
-        subtitle=subtitle,
-        metadata=metadata or None,
-    )
+    if show_header:
+        _set_figure_header(
+            fig,
+            title=_title_with_scenario(
+                history,
+                f'Environmental Belief Snapshots  —  {status}',
+            ),
+            subtitle=subtitle,
+            metadata=metadata or None,
+        )
+    else:
+        plt.tight_layout()
     fig.savefig(filepath, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f"  Saved: {filepath}")
 
 
 def make_trajectories_plot(history: dict, filepath: str,
-                         use_substeps: bool = True) -> None:
+                         use_substeps: bool = True,
+                         show_ticks: bool = True,
+                         show_header: bool = True) -> None:
     """Plot rover and copter trajectories on the ground-truth grid."""
     palette = _agent_palette(history)
+    rover_label, copter_label = _agent_legend_labels(history)
     fig, ax = plt.subplots(figsize=(7, 7))
-
-    for i in range(GRID + 1):
-        ax.axhline(i - 0.5, color='#ddd', lw=0.6)
-        ax.axvline(i - 0.5, color='#ddd', lw=0.6)
-    for (r, c), labels in TRUE_L.items():
-        for ap in labels:
-            color = AP_COLOURS.get(ap)
-            if color:
-                ax.add_patch(mpatches.Rectangle(
-                    (c - 0.5, r - 0.5), 1, 1,
-                    facecolor=color, alpha=AP_GRID_ALPHA, edgecolor='none'))
-    _annotate_true_labels(ax, fontsize=AP_OVERLAY_FONT_SIZE)
+    _draw_trajectory_base(ax, show_ticks=show_ticks, annotate_labels=True)
 
     if use_substeps and 'rover_substeps' in history:
         rpath = np.array(history['rover_substeps'])
@@ -342,9 +413,9 @@ def make_trajectories_plot(history: dict, filepath: str,
     cpath_cols = cpath[:, 1] + COPTER_PATH_COL_OFFSET
 
     ax.plot(rpath_cols, rpath_rows, '-', color=palette['rover_path'],
-            lw=PATH_LINEWIDTH, alpha=PATH_ALPHA, label='Rover path')
+            lw=PATH_LINEWIDTH, alpha=PATH_ALPHA, label=rover_label)
     ax.plot(cpath_cols, cpath_rows, '-', color=palette['copter_path'],
-            lw=PATH_LINEWIDTH, alpha=PATH_ALPHA, label='Copter path')
+            lw=PATH_LINEWIDTH, alpha=PATH_ALPHA, label=copter_label)
     ax.plot(rpath_cols[0], rpath_rows[0], 'o', color=palette['rover'],
             markersize=6)
     ax.plot(cpath_cols[0], cpath_rows[0], 'o', color=palette['copter'],
@@ -356,27 +427,26 @@ def make_trajectories_plot(history: dict, filepath: str,
 
     status = _run_status(history)
     metadata = _format_run_metadata(history)
-    _set_figure_header(
-        fig,
-        title=_title_with_scenario(
-            history,
-            f'Trajectories  (k={history["k_final"]})  —  {status}',
-        ),
-        metadata=metadata or None,
-    )
-    _set_square_grid_axes(ax)
-    ax.set_xlim(-0.5, GRID - 0.5)
-    ax.set_ylim(GRID - 0.5, -0.5)
-    ax.set_xticks(range(GRID))
-    ax.set_yticks(range(GRID))
-    ax.tick_params(labelsize=AXIS_TICK_FONT_SIZE)
-    ax.legend(fontsize=LEGEND_FONT_SIZE, loc='upper right')
+    if show_header:
+        _set_figure_header(
+            fig,
+            title=_title_with_scenario(
+                history,
+                f'(k={history["k_final"]})  —  {status}',
+            ),
+            metadata=metadata or None,
+        )
+    else:
+        plt.tight_layout()
+    ax.legend(fontsize=TRAJECTORY_LEGEND_FONT_SIZE, loc='upper right')
     fig.savefig(filepath, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f"  Saved: {filepath}")
 
 
-def make_final_beliefs_plot(history: dict, filepath: str) -> None:
+def make_final_beliefs_plot(history: dict, filepath: str,
+                            show_ticks: bool = True,
+                            show_header: bool = True) -> None:
     """
     Final belief maps for all 5 APs side by side.
     """
@@ -389,12 +459,16 @@ def make_final_beliefs_plot(history: dict, filepath: str) -> None:
                         rover_pos  = history['final_rover'],
                         copter_pos = history['final_copter'],
                         rover_color=palette['rover'],
-                        copter_color=palette['copter'])
-    _set_figure_header(
-        fig,
-        title=_title_with_scenario(history, 'Final Belief Maps (all APs)'),
-        metadata=metadata or None,
-    )
+                        copter_color=palette['copter'],
+                        show_ticks=show_ticks)
+    if show_header:
+        _set_figure_header(
+            fig,
+            title=_title_with_scenario(history, 'Final Belief Maps (all APs)'),
+            metadata=metadata or None,
+        )
+    else:
+        plt.tight_layout()
     fig.savefig(filepath, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f"  Saved: {filepath}")
@@ -433,7 +507,8 @@ def make_v_fxn_heatmap(beliefs: dict, filepath: str, rover_pos: tuple,
 
 
 def make_convergence_plot(history: dict, filepath: str,
-                          obstacle_cells=None, free_cells=None) -> None:
+                          obstacle_cells=None, free_cells=None,
+                          show_header: bool = True) -> None:
     """
     Plot belief convergence for obstacle and free cells.
 
@@ -457,11 +532,14 @@ def make_convergence_plot(history: dict, filepath: str,
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
     metadata = _format_run_metadata(history)
-    _set_figure_header(
-        fig,
-        title=_title_with_scenario(history, 'belief convergence'),
-        metadata=metadata or None,
-    )
+    if show_header:
+        _set_figure_header(
+            fig,
+            title=_title_with_scenario(history, 'belief convergence'),
+            metadata=metadata or None,
+        )
+    else:
+        plt.tight_layout()
 
     colors_obs = ['#d62728', '#e377c2', '#ff7f0e']
     colors_free = ['#1f77b4', '#17becf', '#2ca02c']
@@ -658,7 +736,7 @@ def make_unified_animation(history: dict, filepath: str,
             history, belief_history)
     phase_list = history.get('phase_list', None)
     n_frames   = min(len(bh), len(rover_path), len(copter_path), len(k_list))
-    metadata = _format_run_metadata(history)
+    metadata = _format_run_metadata(history, include_seed=True)
     v_history    = history.get('v_history', None)  # list of V dicts, one per VI call
     fsa_states   = history.get('fsa_states', [0])  # rover FSA state per cycle
     epoch_span   = _epoch_span(history)
@@ -683,52 +761,27 @@ def make_unified_animation(history: dict, filepath: str,
         has_subtitle=False,
         has_metadata=bool(metadata),
     )
-    fig, ax = plt.subplots(figsize=(8, 8))
-    plt.subplots_adjust(top=header_layout['top_margin'])
-    for i in range(GRID + 1):
-        ax.axhline(i - 0.5, color='#aaa', lw=0.4, zorder=1)
-        ax.axvline(i - 0.5, color='#aaa', lw=0.4, zorder=1)
-    _set_square_grid_axes(ax)
-    ax.set_xlim(-0.5, GRID - 0.5)
-    ax.set_ylim(GRID - 0.5, -0.5)
-    ax.set_xticks(range(GRID))
-    ax.set_yticks(range(GRID))
-    ax.tick_params(labelsize=AXIS_TICK_FONT_SIZE)
+    fig, ax = plt.subplots(figsize=(7, 7))
+    _draw_trajectory_base(ax, show_ticks=True, annotate_labels=True)
 
     im_obs = ax.imshow(
         np.full((GRID, GRID), 0.5), vmin=0, vmax=1,
         cmap='Greys', origin='upper', aspect='equal',
         alpha=0.6, zorder=3, interpolation='nearest')
 
-    rover_dot,    = ax.plot([], [], 'o', color=palette['rover'], ms=11,
-                            markeredgecolor='white', markeredgewidth=1.5,
-                            zorder=6)
-    copter_dot,   = ax.plot([], [], 'o', color=palette['copter'], ms=11,
-                            markeredgecolor='white', markeredgewidth=1.5,
-                            zorder=6)
+    rover_dot,    = ax.plot([], [], 'o', color=palette['rover'], ms=6, zorder=6)
+    copter_dot,   = ax.plot([], [], 'o', color=palette['copter'], ms=6, zorder=6)
     rover_trail,  = ax.plot([], [], '-', color=palette['rover_path'], lw=PATH_LINEWIDTH,
                             alpha=PATH_ALPHA, zorder=5)
     copter_trail, = ax.plot([], [], '-', color=palette['copter_path'],
                             lw=PATH_LINEWIDTH,
                             alpha=PATH_ALPHA, zorder=5)
 
-    # AP label texts - fade in as belief rises.
-    revealed_texts = {
-        (r, c, ap): ax.text(
-            c - 0.46, r - 0.43, '', ha='left', va='top',
-            fontsize=AP_OVERLAY_COMPACT_FONT_SIZE,
-            color=AP_COLOURS.get(ap, 'gray'), fontweight='bold',
-            alpha=0.0, zorder=7, linespacing=AP_OVERLAY_LINESPACING)
-        for r in range(GRID)
-        for c in range(GRID)
-        for ap in AP_LIST
-    }
-
     # V value texts - small number in top-left corner of each cell.
     v_texts = {
         (r, c): ax.text(
             c - 0.38, r - 0.35, '', ha='left', va='top',
-            fontsize=5.5, color='#1a6b1a', alpha=0.85, zorder=8)
+            fontsize=ANIMATION_V_FONT_SIZE, color='#1a6b1a', alpha=0.85, zorder=8)
         for r in range(GRID)
         for c in range(GRID)
     }
@@ -738,11 +791,12 @@ def make_unified_animation(history: dict, filepath: str,
                     'W': 'Warmup', 'I': 'Init', 'E': 'End'}.get(
                         initial_phase, initial_phase)
     header_title = fig.suptitle(
-        _title_with_scenario(
+        _animation_title(
             history,
-            f'[{initial_pstr}]   q={get_q_for_frame(0)}',
+            phase_text=initial_pstr,
+            q_value=get_q_for_frame(0),
         ),
-        fontsize=header_layout['title_font_size'],
+        fontsize=ANIMATION_HEADER_FONT_SIZE,
         fontfamily=PLOT_FONT_FAMILY,
         fontweight='bold',
         y=header_layout['suptitle_y'],
@@ -755,32 +809,16 @@ def make_unified_animation(history: dict, filepath: str,
             metadata,
             ha='center',
             va='top',
-            fontsize=header_layout['meta_font_size'],
+            fontsize=ANIMATION_META_FONT_SIZE,
             fontfamily=PLOT_FONT_FAMILY,
         )
-    ax.legend(handles=[
-        mpatches.Patch(color=palette['rover'], label='Rover'),
-        mpatches.Patch(color=palette['copter'], label='Copter'),
-        mpatches.Patch(color='#555',        label='High obstacle belief'),
-        mpatches.Patch(color='#1a6b1a',     label='V(cell, q) — mission value'),
-    ], loc='upper right', fontsize=LEGEND_FONT_SIZE)
+    plt.tight_layout(rect=(0, 0, 1, header_layout['top_margin']))
 
     def update(i):
         beliefs_i = bh[i]
         obs_grid  = np.array([[beliefs_i[(r, c)]['O'] for c in range(GRID)]
                               for r in range(GRID)])
         im_obs.set_data(obs_grid)
-
-        # AP belief labels.
-        for r in range(GRID):
-            for c in range(GRID):
-                for ap in AP_LIST:
-                    b     = beliefs_i[(r, c)][ap]
-                    alpha = max(0.0, min(1.0, (b - 0.55) * 6))
-                    revealed_texts[(r, c, ap)].set_text(
-                        _ap_overlay_text(ap)
-                    )
-                    revealed_texts[(r, c, ap)].set_alpha(alpha)
 
         # V value labels.
         V_now = get_V_for_frame(i)
@@ -802,23 +840,28 @@ def make_unified_animation(history: dict, filepath: str,
                 tr[:, 1] + ROVER_PATH_COL_OFFSET,
                 tr[:, 0] + ROVER_PATH_ROW_OFFSET,
             )
-        rover_dot.set_data([rover_path[ri][1]], [rover_path[ri][0]])
+        rover_dot.set_data(
+            [rover_path[ri][1] + ROVER_PATH_COL_OFFSET],
+            [rover_path[ri][0] + ROVER_PATH_ROW_OFFSET],
+        )
         if ci > 0:
             tc = np.array(copter_path[:ci + 1])
             copter_trail.set_data(
                 tc[:, 1] + COPTER_PATH_COL_OFFSET,
                 tc[:, 0] + COPTER_PATH_ROW_OFFSET,
             )
-        copter_dot.set_data([copter_path[ci][1]], [copter_path[ci][0]])
+        copter_dot.set_data(
+            [copter_path[ci][1] + COPTER_PATH_COL_OFFSET],
+            [copter_path[ci][0] + COPTER_PATH_ROW_OFFSET],
+        )
 
         phase = phase_list[min(i, len(phase_list) - 1)] if phase_list else '?'
         pstr  = {'C': 'Copter exploring', 'R': 'Rover executing',
                  'W': 'Warmup', 'I': 'Init', 'E': 'End'}.get(phase, phase)
         header_title.set_text(
-            _title_with_scenario(history, f'[{pstr}]   q={q_now}')
+            _animation_title(history, phase_text=pstr, q_value=q_now)
         )
         return ([im_obs, rover_dot, copter_dot, rover_trail, copter_trail, header_title]
-                + list(revealed_texts.values())
                 + list(v_texts.values()))
 
     anim = FuncAnimation(fig, update, frames=n_frames, interval=200, blit=False)

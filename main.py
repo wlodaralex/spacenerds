@@ -62,6 +62,7 @@ def main():
 
         # step 2 save outputs
         prefix = OUTPUT_DIR / f"scen{scenario.name}"
+        plot_stem = OUTPUT_DIR / f"{scenario.name}_{scenario.seed}"
         hist.save(
             f"scen{scenario.name}",
             outdir = str(OUTPUT_DIR),
@@ -72,32 +73,34 @@ def main():
         # make_belief_snapshots_plot(legacy, filepath=f"{prefix}_belief_snapshots.png")
         make_trajectories_plot(
             legacy,
-            filepath     = f"{prefix}_trajectories.png",
+            filepath     = f"{plot_stem}.png",
             use_substeps = True,
+            show_ticks=True,
+            show_header=True,
         )
-        # make_final_beliefs_plot(legacy, filepath=f"{prefix}_final_beliefs.png")
+        # make_final_beliefs_plot(legacy, filepath=f"{plot_stem}_final_beliefs.png")
         # make_v_fxn_heatmap(
         #     legacy['beliefs_snapshot'][0],
-        #     filepath=f"{prefix}_value_function_q0.png",
+        #     filepath=f"{plot_stem}_value_function_q0.png",
         #     rover_pos=scenario.rover_start,
         #     rover_q=0,
         # )
         # make_convergence_plot(
         #     legacy,
-        #     filepath = f"{prefix}_convergence.png",
+        #     filepath = f"{plot_stem}_convergence.png",
         # )
         # make_beliefs_animation(
         #     legacy,
-        #     filepath=f"{prefix}_beliefs_animation.mp4",
+        #     filepath=f"{plot_stem}_beliefs_animation.mp4",
         #     fps=4,
         #     use_substeps=True,
         # )
-        # make_unified_animation(
-        #     legacy,
-        #     filepath=f"{prefix}_unified_animation.mp4",
-        #     fps=4,
-        #     use_substeps=True,
-        # )
+        make_unified_animation(
+            legacy,
+            filepath=f"{plot_stem}_unified_animation.mp4",
+            fps=4,
+            use_substeps=True,
+        )
 
     print("\nOutputs saved to:", OUTPUT_DIR)
 
